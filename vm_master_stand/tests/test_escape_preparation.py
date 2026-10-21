@@ -1,10 +1,9 @@
 import os
-import json
-from pathlib import Path
 import subprocess
+from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
-
 from lab_service.config import Settings
 from lab_service.models import ExecResult
 from lab_service.runner import Runner
@@ -14,27 +13,49 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.mark.parametrize("failure", [None, "exit", "timeout"])
-def test_escape_up_recreates_vm_and_stops_on_failed_destroy(monkeypatch, failure):
-    runner = Runner(Settings(root=ROOT, sandbox_token="s" * 32, evaluator_token="e" * 32))
+def test_escape_up_restores_snapshot_and_stops_on_failed_restore(monkeypatch, failure):
+    runner = Runner(
+        Settings(root=ROOT, sandbox_token="s" * 32, evaluator_token="e" * 32)
+    )
     # Keep lifecycle lock files out of the real repository.
     from contextlib import nullcontext
+
     monkeypatch.setattr(runner, "transaction", lambda _: nullcontext())
     calls = []
 
+    monkeypatch.setattr("lab_service.runner.escape_snapshot", lambda _: "clean")
+
     def run(attack, args, timeout):
         calls.append(args)
-        if args[0] == "destroy" and failure:
-            return ExecResult(exit_code=1 if failure == "exit" else 124, timed_out=failure == "timeout")
+        if args[:2] == ["snapshot", "restore"] and failure:
+            return ExecResult(
+                exit_code=1 if failure == "exit" else 124,
+                timed_out=failure == "timeout",
+            )
         return ExecResult(exit_code=0)
 
     monkeypatch.setattr(runner, "run", run)
     result = runner.up(Scenarios(ROOT, "escapes").load("docker-socket"))
-    assert calls[0] == ["destroy", "-f"]
+    assert calls[0] == ["snapshot", "restore", "clean"]
     if failure:
         assert len(calls) == 1 and result.exit_code
     else:
-        assert calls[1] == ["up", "--provider=virtualbox", "--provision"]
-        assert "clean VM + provisioning:" in result.stdout
+        assert calls[1] == ["provision"]
+        assert "snapshot restore + provisioning:" in result.stdout
+
+
+def test_escape_down_restores_snapshot_without_start(monkeypatch):
+    runner = Runner(
+        Settings(root=ROOT, sandbox_token="s" * 32, evaluator_token="e" * 32)
+    )
+    from contextlib import nullcontext
+
+    monkeypatch.setattr(runner, "transaction", lambda _: nullcontext())
+    monkeypatch.setattr("lab_service.runner.escape_snapshot", lambda _: "clean")
+    run = Mock(return_value=ExecResult(exit_code=0))
+    monkeypatch.setattr(runner, "run", run)
+    runner.down(Scenarios(ROOT, "escapes").load("docker-socket"))
+    assert run.call_args.args[1] == ["snapshot", "restore", "clean", "--no-start"]
 
 
 def image_attempt(tmp_path, *, cached, version, adapter):
@@ -43,7 +64,7 @@ def image_attempt(tmp_path, *, cached, version, adapter):
     log = tmp_path / "docker.log"
     dockerfile.write_text("FROM node:24-bookworm-slim\n")
     adapter_file.write_text(adapter)
-    script = '''
+    script = """
 set -euo pipefail
 source "$COMMON"
 cat() { command cat "$TEST_DOCKERFILE" "$TEST_ADAPTER"; }
@@ -52,11 +73,19 @@ docker() {
   if [[ $1 == image ]]; then return "$CACHE_MISS"; fi
 }
 lab_image
-'''
-    env = {**os.environ, "COMMON": str(ROOT / "vm/escape/common.sh"),
-           "TEST_DOCKERFILE": str(dockerfile), "TEST_ADAPTER": str(adapter_file),
-           "TEST_LOG": str(log), "CACHE_MISS": "0" if cached else "1", "LAB_OPENCLAW_VERSION": version}
-    subprocess.run(["bash", "-c", script], env=env, check=True, capture_output=True, text=True)
+"""
+    env = {
+        **os.environ,
+        "COMMON": str(ROOT / "vm/escape/common.sh"),
+        "TEST_DOCKERFILE": str(dockerfile),
+        "TEST_ADAPTER": str(adapter_file),
+        "TEST_LOG": str(log),
+        "CACHE_MISS": "0" if cached else "1",
+        "LAB_OPENCLAW_VERSION": version,
+    }
+    subprocess.run(
+        ["bash", "-c", script], env=env, check=True, capture_output=True, text=True
+    )
     return log.read_text().splitlines()
 
 
@@ -68,21 +97,33 @@ def test_prepared_image_reuse_and_invalidation(tmp_path):
         paths.append(path)
     hit = image_attempt(paths[0], cached=True, version="2026.9.6", adapter="old")
     miss = image_attempt(paths[1], cached=False, version="2026.9.6", adapter="old")
-    changed_source = image_attempt(paths[2], cached=True, version="2026.9.6", adapter="new")
-    changed_version = image_attempt(paths[3], cached=True, version="2026.9.7", adapter="old")
+    changed_source = image_attempt(
+        paths[2], cached=True, version="2026.9.6", adapter="new"
+    )
+    changed_version = image_attempt(
+        paths[3], cached=True, version="2026.9.7", adapter="old"
+    )
     assert len(hit) == 1  # Warm path cannot execute a build.
-    assert len(miss) == 2 and miss[1].endswith("compose -f vm/escape/compose.yml build sandbox")
+    assert len(miss) == 2 and miss[1].endswith(
+        "compose -f vm/escape/compose.yml build sandbox"
+    )
     assert hit[0].split()[0] == miss[0].split()[0]
-    assert len({rows[0].split()[0] for rows in (hit, changed_source, changed_version)}) == 3
+    assert (
+        len({rows[0].split()[0] for rows in (hit, changed_source, changed_version)})
+        == 3
+    )
 
 
 def builder_module():
     from lab_service import benchmark
+
     return benchmark
 
 
 @pytest.mark.parametrize("fail_step", [None, "up", "reload", "ssh", "package"])
-def test_builder_isolated_from_benchmark_and_cleans_up(monkeypatch, tmp_path, fail_step):
+def test_builder_isolated_from_benchmark_and_cleans_up(
+    monkeypatch, tmp_path, fail_step
+):
     module = builder_module()
     monkeypatch.setattr(module, "ROOT", tmp_path)
     monkeypatch.setenv("LAB_EVALUATOR_TOKEN", "must-not-reach-builder")
@@ -104,7 +145,14 @@ def test_builder_isolated_from_benchmark_and_cleans_up(monkeypatch, tmp_path, fa
         assert calls[-2][0][1:3] == ["box", "add"]
     assert calls[-1][0] == ["vagrant", "destroy", "-f"]
     if not fail_step:
-        assert [args[1] for args, _ in calls] == ["up", "reload", "ssh", "package", "box", "destroy"]
+        assert [args[1] for args, _ in calls] == [
+            "up",
+            "reload",
+            "ssh",
+            "package",
+            "box",
+            "destroy",
+        ]
     for _, kwargs in calls:
         env = kwargs["env"]
         assert kwargs["cwd"] != tmp_path / "vagrant"
@@ -129,7 +177,7 @@ def test_builder_preserves_existing_output(monkeypatch, tmp_path):
 
 def test_builder_can_replace_obsolete_kernel_headers(tmp_path):
     log = tmp_path / "apt.log"
-    script = '''
+    script = """
 set -euo pipefail
 source "$COMMON"
 uname() { printf 'obsolete-test-kernel'; }
@@ -141,18 +189,24 @@ command() {
 }
 apt-get() { printf '%s\\n' "$*" >> "$TEST_LOG"; }
 lab_dependencies all
-'''
-    subprocess.run(["bash", "-c", script], env={**os.environ,
-                   "COMMON": str(ROOT / "vm/escape/common.sh"), "TEST_LOG": str(log)},
-                   capture_output=True, check=True)
+"""
+    subprocess.run(
+        ["bash", "-c", script],
+        env={
+            **os.environ,
+            "COMMON": str(ROOT / "vm/escape/common.sh"),
+            "TEST_LOG": str(log),
+        },
+        capture_output=True,
+        check=True,
+    )
     installed = log.read_text()
     assert "linux-image-generic linux-headers-generic" in installed
     assert "linux-headers-obsolete-test-kernel" not in installed
 
 
 def init_root(tmp_path):
-    for name in ("vagrant/Vagrantfile", "vm/escape/common.sh", "vm/escape/prepare-box.sh",
-                 "vm/escape/Dockerfile", "vm/openclaw-adapter/adapter.py"):
+    for name in builder_module().BOX_INPUTS:
         path = tmp_path / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(name)
@@ -164,12 +218,24 @@ def test_init_reuses_registered_box_and_rebuilds_changed_inputs(monkeypatch, tmp
     root = init_root(tmp_path)
     calls = []
     monkeypatch.setattr(module, "box_registered", lambda _: True)
-    monkeypatch.setattr(module, "build_box", lambda *args, **kwargs: calls.append((args, kwargs)))
+    monkeypatch.setattr(
+        module, "build_box", lambda *args, **kwargs: calls.append((args, kwargs))
+    )
+    snapshots = []
+    monkeypatch.setattr(
+        module, "prepare_runtime_snapshot", lambda *args: snapshots.append(args)
+    )
+    monkeypatch.setattr(module, "_snapshot_available", lambda *args: True)
     first = module.init_benchmark(root, name="lab/prepared")
     assert module.init_benchmark(root) == first
     assert len(calls) == 1
+    assert len(snapshots) == 1
+    assert first["snapshot"] == "agentic-lab-clean"
     assert module.escape_config(root) == ("lab/prepared", "2026.9.6")
-    assert module.escape_config(root, "lab/override", "2026.9.7") == ("lab/override", "2026.9.7")
+    assert module.escape_config(root, "lab/override", "2026.9.7") == (
+        "lab/override",
+        "2026.9.7",
+    )
     (root / "vm/openclaw-adapter/adapter.py").write_text("changed adapter")
     second = module.init_benchmark(root, name="lab/new")
     assert len(calls) == 2
@@ -177,11 +243,42 @@ def test_init_reuses_registered_box_and_rebuilds_changed_inputs(monkeypatch, tmp
     assert module.selected_box(root) == "lab/new"
 
 
-def test_init_rebuilds_missing_box_and_does_not_publish_failed_build(monkeypatch, tmp_path):
+def test_runtime_snapshot_is_isolated_and_powered_off(monkeypatch, tmp_path):
+    module = builder_module()
+    root = init_root(tmp_path)
+    calls = []
+
+    def vagrant(root_arg, environment, *args, **kwargs):
+        calls.append((root_arg, environment, list(args), kwargs))
+
+    monkeypatch.setattr(module, "_runtime_vagrant", vagrant)
+    module.prepare_runtime_snapshot(root, "lab/prepared", "2026.9.7", "clean")
+
+    assert [item[2] for item in calls] == [
+        ["destroy", "-f"],
+        ["up", "--provider=virtualbox", "--no-provision"],
+        [
+            "ssh",
+            "-c",
+            "test -d /opt/agentic-lab/vm/escape && sudo docker info >/dev/null",
+        ],
+        ["halt", "-f"],
+        ["snapshot", "save", "-f", "clean"],
+    ]
+    environment = calls[0][1]
+    assert environment["LAB_ISOLATED_ESCAPE"] == "1"
+    assert environment["LAB_VAGRANT_BOX"] == "lab/prepared"
+    assert environment["LAB_OPENCLAW_VERSION"] == "2026.9.7"
+
+
+def test_init_rebuilds_missing_box_and_does_not_publish_failed_build(
+    monkeypatch, tmp_path
+):
     module = builder_module()
     root = init_root(tmp_path)
     monkeypatch.setattr(module, "build_box", lambda *args, **kwargs: None)
-    first = module.init_benchmark(root, name="lab/first")
+    monkeypatch.setattr(module, "prepare_runtime_snapshot", lambda *args: None)
+    module.init_benchmark(root, name="lab/first")
     monkeypatch.setattr(module, "box_registered", lambda _: False)
     calls = []
     monkeypatch.setattr(module, "build_box", lambda *args, **kwargs: calls.append(args))
@@ -201,13 +298,15 @@ def test_init_rebuilds_missing_box_and_does_not_publish_failed_build(monkeypatch
 def test_runner_uses_initialized_box_and_version(monkeypatch, tmp_path):
     import shutil
     from unittest.mock import Mock
+
     from lab_service.benchmark import init_benchmark
+
     module = builder_module()
     root = init_root(tmp_path)
     monkeypatch.setattr(module, "build_box", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module, "prepare_runtime_snapshot", lambda *args: None)
     init_benchmark(root, name="lab/prepared", version="2026.9.7")
-    for directory in ("escapes", "vm/escape/profiles"):
-        shutil.copytree(ROOT / directory, root / directory)
+    shutil.copytree(ROOT / "escapes", root / "escapes")
     (root / "vm/escape/setup.sh").write_text("setup")
     process = Mock(pid=123, returncode=0)
     process.communicate.return_value = (b"ok", b"")

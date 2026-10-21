@@ -57,7 +57,6 @@ class Conversation(Base):
     status: Mapped[str] = mapped_column(
         String(32), default=ConversationStatus.queued.value, index=True
     )
-    task_prompt: Mapped[str] = mapped_column(Text)
     config: Mapped[dict[str, Any]] = mapped_column(JSON)
     context_size: Mapped[int] = mapped_column(Integer)
     compression_threshold: Mapped[float]

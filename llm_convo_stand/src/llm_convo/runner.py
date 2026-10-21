@@ -219,9 +219,7 @@ class ConversationRunner:
             worker_id=self._worker_id,
         )
         try:
-            with self._tracing.conversation(
-                str(conversation_id), conversation.task_prompt
-            ) as root_observation:
+            with self._tracing.conversation(str(conversation_id)) as root_observation:
                 with self._tracing.attributes(str(conversation_id)):
                     if is_benchmark and self._benchmark:
                         await self._benchmark.prepare(conversation_id)
@@ -337,7 +335,6 @@ class ConversationRunner:
         for _ in range(3):
             prompt = build_working_context(
                 system_prompt=agent.system_prompt,
-                task_prompt=state.task_prompt,
                 speaker=state.next_speaker,
                 summary=state.working_summary,
                 messages=messages,
@@ -360,7 +357,7 @@ class ConversationRunner:
         eligible = messages[:-retain] if len(messages) > retain else []
         if not eligible and not state.working_summary:
             raise ContextLimitError(
-                "Task, system prompt, and retained messages exceed the context budget; "
+                "System prompt and retained messages exceed the context budget; "
                 "there is no older dialogue available to summarize"
             )
 
@@ -542,9 +539,19 @@ class ConversationRunner:
                 async def execute_terminal(call: ToolCall, ordinal: int) -> dict[str, Any]:
                     return await self._benchmark.execute_terminal(state.id, sequence, call, ordinal)
 
-                result = await AgentBReactGraph(complete, execute_terminal).run(
-                    messages, max_tool_calls=run.max_tool_calls_per_b_turn
-                )
+                async def observe_model(result: LLMResult, step: int) -> None:
+                    await self._benchmark.record_agent_step(
+                        state.id,
+                        sequence,
+                        result,
+                        step,
+                    )
+
+                result = await AgentBReactGraph(
+                    complete,
+                    execute_terminal,
+                    observe_model,
+                ).run(messages, max_tool_calls=run.max_tool_calls_per_b_turn)
                 await on_stream_start()
                 if result.content:
                     await on_token(result.content)

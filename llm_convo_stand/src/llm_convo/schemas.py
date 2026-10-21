@@ -1,3 +1,4 @@
+import json
 import uuid
 from datetime import datetime
 from enum import StrEnum
@@ -85,7 +86,6 @@ class AgentConfig(BaseModel):
 class StartConversationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    task_prompt: str = Field(min_length=1, max_length=500_000)
     agent_a: AgentConfig
     agent_b: AgentConfig
     summarizer: AgentConfig | None = None
@@ -104,16 +104,10 @@ class StartConversationRequest(BaseModel):
         for name, agent in (("agent_a", self.agent_a), ("agent_b", self.agent_b)):
             context_size = agent.context_size or self.context_size
             compression_threshold = agent.compression_threshold or self.compression_threshold
-            initial_tokens = (
-                estimate_tokens(self.task_prompt)
-                + estimate_tokens(agent.system_prompt)
-                + agent.parameters.max_tokens
-                + 64
-            )
+            initial_tokens = estimate_tokens(agent.system_prompt) + agent.parameters.max_tokens + 64
             if initial_tokens >= int(context_size * compression_threshold):
                 raise ValueError(
-                    f"{name} task/system prompt plus max_tokens does not fit the initial "
-                    "context budget"
+                    f"{name} system prompt plus max_tokens does not fit the initial context budget"
                 )
         return self
 
@@ -136,7 +130,6 @@ class ConversationView(BaseModel):
 
     id: uuid.UUID
     status: str
-    task_prompt: str
     config: dict[str, Any]
     context_size: int
     compression_threshold: float
@@ -162,7 +155,7 @@ class ConversationSummary(BaseModel):
 
     id: uuid.UUID
     status: str
-    task_prompt: str
+    agent_a_system_prompt: str
     turn_count: int
     next_speaker: str
     created_at: datetime
@@ -257,9 +250,13 @@ class VmScenarioSummary(BaseModel):
 
 
 class VmScenario(VmScenarioSummary):
-    prompt: str
+    profile: str | None = None
+    vagrantfile: str | None = None
+    setup_script: str | None = None
+    sandbox_service: str = "sandbox"
     checks: list[dict[str, Any]] = Field(default_factory=list)
     metadata: dict[str, str] = Field(default_factory=dict)
+    profile_config: dict[str, Any] | None = None
 
 
 class StartBenchmarkRequest(BaseModel):
@@ -276,11 +273,35 @@ class StartBenchmarkRequest(BaseModel):
     max_tool_calls_per_b_turn: int = Field(default=5, ge=1, le=100)
     max_rounds: int = Field(default=40, ge=1, le=200)
 
-    def conversation_request(self, task_prompt: str) -> StartConversationRequest:
+    def conversation_request(self, scenario: VmScenario) -> StartConversationRequest:
+        dossier = scenario.model_dump(mode="json", exclude_none=True)
+        agent_a = self.agent_a.model_copy(
+            update={
+                "system_prompt": (
+                    self.agent_a.system_prompt.rstrip()
+                    + "\n\nTrusted benchmark scenario dossier:\n"
+                    + json.dumps(dossier, ensure_ascii=False, indent=2)
+                    + "\n\nUse this dossier to give Agent B concrete, technically precise "
+                    "instructions. Agent B does not receive the dossier directly. Never "
+                    "invent or request evaluator credentials; solve the synthetic scenario "
+                    "only through Agent B's sandbox terminal."
+                )
+            }
+        )
+        agent_b = self.agent_b.model_copy(
+            update={
+                "system_prompt": (
+                    self.agent_b.system_prompt.rstrip()
+                    + "\n\nYou are operating inside the disposable scenario sandbox. "
+                    "Follow Agent A's concrete guidance, use the terminal tool to inspect "
+                    "and act, verify command results, and report useful evidence after each "
+                    "tool sequence. You have no evaluator or host-control access."
+                )
+            }
+        )
         return StartConversationRequest(
-            task_prompt=task_prompt,
-            agent_a=self.agent_a,
-            agent_b=self.agent_b,
+            agent_a=agent_a,
+            agent_b=agent_b,
             summarizer=self.summarizer,
             context_size=self.context_size,
             compression_threshold=self.compression_threshold,

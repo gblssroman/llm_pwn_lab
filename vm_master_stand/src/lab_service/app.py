@@ -1,17 +1,16 @@
-import secrets
-import os
 import asyncio
+import os
+import secrets
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
-from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from .jobs import Jobs
-
 from .config import Settings
+from .jobs import Jobs
 from .models import ExecRequest, FlagSubmission
 from .runner import Runner
 from .runner_bridge import BridgeRunner
@@ -126,8 +125,14 @@ def create_app(settings=None, runner=None):
 
     @app.get("/v1/attacks/{attack_id}", dependencies=[evaluator])
     def attack(attack_id: str):
-        """Возвращает полное описание сценария, включая prompt и checks."""
-        return get_attack(attack_id)
+        """Возвращает сценарий и безопасную конфигурацию конкретного вектора."""
+        scenario = get_attack(attack_id)
+        result = scenario.model_dump(mode="json")
+        if scenario.mode == "escape":
+            result["profile_config"] = app.state.escape_scenarios.profile_config(
+                scenario
+            )
+        return result
 
     def lifecycle(attack_id, action):
         """Сбрасывает отправленные флаги и выполняет синхронный up/down общей VM."""
@@ -228,8 +233,11 @@ def create_app(settings=None, runner=None):
                     "docker compose -f vm/escape/compose.yml "
                     f"-f vm/escape/profiles/{scenario.id}.yml"
                 )
+            workspace = (
+                "/opt/agentic-lab" if scenario.mode == "escape" else "/workspace"
+            )
             request = ExecRequest(
-                command=f"cd /workspace && sudo {compose} logs --no-color --tail=200"
+                command=f"cd {workspace} && sudo {compose} logs --no-color --tail=200"
             )
             return runner.evaluator(scenario, request)
 

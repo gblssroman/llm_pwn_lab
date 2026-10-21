@@ -170,9 +170,9 @@ textarea { padding: 7px; resize: vertical; line-height: 1.4; }
 .stat { border: 1px solid #ccc; padding: 6px 8px; }
 .stat span { display: block; color: #666; font-size: 11px; }
 .stat strong { display: block; margin-top: 2px; }
-.task-card { border: 1px solid #ccc; padding: 7px 9px; }
-.task-card span { color: #666; font-size: 11px; }
-.task-card p { margin: 4px 0 0; max-height: 72px; overflow-y: auto; white-space: pre-wrap; }
+.agent-prompt-card { border: 1px solid #ccc; padding: 7px 9px; }
+.agent-prompt-card span { color: #666; font-size: 11px; }
+.agent-prompt-card p { margin: 4px 0 0; max-height: 72px; overflow-y: auto; white-space: pre-wrap; }
 
 .message-stream {
   min-height: 0;
@@ -195,6 +195,20 @@ textarea { padding: 7px; resize: vertical; line-height: 1.4; }
 .avatar { font-weight: 700; }
 .message.agent_a .avatar { color: #075f16; }
 .message.agent_b .avatar { color: #4a267a; }
+.message.react-step { background: #faf7ff; }
+.message.tool-message { background: #f7f7f7; }
+.message.tool-message.running { background: #fffbe8; }
+.tool-avatar { color: #555; font-size: 11px; }
+.tool-command, .tool-output {
+  margin: 7px 0 0;
+  padding: 8px;
+  border: 1px solid #bbb;
+  background: #fff;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.tool-output { max-height: 320px; overflow-y: auto; background: #f4f4f4; }
 .message-head { display: flex; justify-content: space-between; gap: 8px; }
 .message-name { font-weight: 700; }
 .message-content { margin-top: 5px; line-height: 1.45; overflow-wrap: anywhere; }

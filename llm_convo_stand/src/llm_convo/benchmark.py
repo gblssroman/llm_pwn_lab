@@ -50,7 +50,7 @@ class BenchmarkService:
         idempotency_key: str,
     ) -> BenchmarkCreateResult:
         fingerprint = benchmark_fingerprint(body, scenario)
-        request = body.conversation_request(scenario.prompt)
+        request = body.conversation_request(scenario)
         async with self._sessions() as session:
             existing = await session.scalar(
                 select(Conversation).where(Conversation.idempotency_key == idempotency_key)
@@ -70,7 +70,6 @@ class BenchmarkService:
             conversation = Conversation(
                 id=uuid.uuid4(),
                 status=ConversationStatus.queued.value,
-                task_prompt=scenario.prompt,
                 config=request.persistent_config(),
                 context_size=request.context_size,
                 compression_threshold=request.compression_threshold,
@@ -388,6 +387,34 @@ class BenchmarkCoordinator:
             },
         )
         return result
+
+    async def record_agent_step(
+        self,
+        conversation_id: uuid.UUID,
+        message_sequence: int,
+        result: Any,
+        step: int,
+    ) -> None:
+        """Persist one internal Agent B ReAct response before any requested tools run."""
+        await self._event(
+            conversation_id,
+            "agent_react_step",
+            {
+                "message_sequence": message_sequence,
+                "step": step,
+                "content": result.content or "",
+                "tool_calls": [
+                    {
+                        "id": call.id,
+                        "name": call.name,
+                        "arguments": call.arguments,
+                    }
+                    for call in result.tool_calls
+                ],
+                "final": not bool(result.tool_calls),
+                "model": result.metadata.get("model") if result.metadata else None,
+            },
+        )
 
     async def after_turn(
         self,

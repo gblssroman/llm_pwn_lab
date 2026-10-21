@@ -75,3 +75,13 @@ class Scenarios:
             self.load(path.stem)
             for path in sorted((self.root / self.directory).glob("*.yaml"))
         ]
+
+    def profile_config(self, attack):
+        """Возвращает доверенную конфигурацию escape-вектора для advisor-контекста."""
+        if self.directory != "escapes" or attack.mode != "escape":
+            return None
+        path = repo_path(self.root, f"vm/escape/profiles/{attack.id}.yml")
+        value = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            raise ValueError("Escape profile must be a mapping")
+        return value

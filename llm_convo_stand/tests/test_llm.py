@@ -7,6 +7,11 @@ from llm_convo.llm import LLMError, OpenAICompatibleClient
 from llm_convo.schemas import AgentConfig, StreamMode
 
 
+class UnreadErrorStream(httpx.AsyncByteStream):
+    async def __aiter__(self):
+        yield b'{"error":"stream unsupported"}'
+
+
 def config(stream: StreamMode = StreamMode.auto, max_retries: int = 0) -> AgentConfig:
     return AgentConfig(
         system_prompt="system",
@@ -134,6 +139,24 @@ async def test_always_stream_does_not_fallback() -> None:
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     client = OpenAICompatibleClient(http)
     with pytest.raises(LLMError):
+        await client.complete(
+            config=config(StreamMode.always), messages=[{"role": "user", "content": "hi"}]
+        )
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_streaming_error_body_is_read_before_it_is_inspected() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            headers={"content-type": "application/json"},
+            stream=UnreadErrorStream(),
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = OpenAICompatibleClient(http)
+    with pytest.raises(LLMError, match="stream unsupported"):
         await client.complete(
             config=config(StreamMode.always), messages=[{"role": "user", "content": "hi"}]
         )

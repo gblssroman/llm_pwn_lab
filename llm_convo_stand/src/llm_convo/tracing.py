@@ -121,7 +121,7 @@ class Tracing:
             log_event(logger, logging.WARNING, "langfuse_query_failed", error=str(exc))
             return [], str(exc)
 
-    def conversation(self, conversation_id: str, task_prompt: str) -> AbstractContextManager[Any]:
+    def conversation(self, conversation_id: str) -> AbstractContextManager[Any]:
         if not self._client:
             return nullcontext(None)
         try:
@@ -130,7 +130,6 @@ class Tracing:
                 trace_context={"trace_id": trace_id},
                 name="llm-conversation",
                 as_type="agent",
-                input={"task_prompt": task_prompt},
                 metadata={"conversation_id": conversation_id},
             )
             return _SafeContext(context)

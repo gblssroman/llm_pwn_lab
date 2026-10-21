@@ -5,6 +5,7 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from llm_convo.context import INITIAL_AGENT_A_MESSAGE
 from llm_convo.db import Base, create_session_factory
 from llm_convo.llm import LLMResult
 from llm_convo.models import ContextSnapshot, Conversation, ConversationStatus, Message
@@ -80,7 +81,6 @@ def start_request(*, timeout_seconds: int = 10, context_size: int = 32768):
         parameters=GenerationParameters(max_tokens=50),
     )
     return StartConversationRequest(
-        task_prompt="Reach a conclusion",
         agent_a=agent,
         agent_b=agent,
         timeout_seconds=timeout_seconds,
@@ -127,7 +127,6 @@ async def test_runner_sends_role_aware_history_and_keeps_system_prompts_private(
 ) -> None:
     service = ConversationService(database)
     request = StartConversationRequest(
-        task_prompt="Shared task",
         agent_a=AgentConfig(
             system_prompt="Private system A",
             api_key_env=None,
@@ -157,22 +156,19 @@ async def test_runner_sends_role_aware_history_and_keeps_system_prompts_private(
     first_a, first_b, second_a, second_b = llm.requests[:4]
     assert first_a == [
         {"role": "system", "content": "Private system A"},
-        {"role": "user", "content": "Shared task from the user:\nShared task"},
+        {"role": "user", "content": INITIAL_AGENT_A_MESSAGE},
     ]
     assert first_b == [
         {"role": "system", "content": "Private system B"},
-        {"role": "user", "content": "Shared task from the user:\nShared task"},
         {"role": "user", "content": "turn 1 ok"},
     ]
     assert [item["role"] for item in second_a] == [
         "system",
-        "user",
         "assistant",
         "user",
     ]
     assert [item["role"] for item in second_b] == [
         "system",
-        "user",
         "user",
         "assistant",
         "user",

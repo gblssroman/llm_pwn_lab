@@ -1,22 +1,24 @@
 import json
+import shutil
 import socket
 import threading
-import shutil
 
+from conftest import ROOT
 from lab_service.jobs import log_sink
 from lab_service.models import ExecResult
-from lab_service.runner_bridge import BridgeRunner, make_server
+from lab_service.runner_bridge import BridgeRunner, make_server, valid_vagrant_args
 from lab_service.scenarios import Scenarios
-from conftest import ROOT
 
 
 def test_bridge_forwards_vagrant_operation_and_live_log(settings, attack):
     calls = []
+
     class Backend:
         def run(self, scenario, args, timeout, environment=None):
             calls.append((scenario.id, args, timeout, environment))
-            log_sink.get()( "stdout", "VM ready\n")
+            log_sink.get()("stdout", "VM ready\n")
             return ExecResult(exit_code=0, stdout="VM ready\n")
+
     path = settings.root / ".runtime" / "host-runner.sock"
     server = make_server(settings.root, path, Backend())
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -27,7 +29,10 @@ def test_bridge_forwards_vagrant_operation_and_live_log(settings, attack):
         result = BridgeRunner(settings, path).up(attack)
         assert result.stdout == "VM ready\n"
         assert events == [("stdout", "VM ready\n")]
-        assert calls[0][:2] == ("context-poisoning", ["up", "--provider=virtualbox", "--provision"])
+        assert calls[0][:2] == (
+            "context-poisoning",
+            ["up", "--provider=virtualbox", "--provision"],
+        )
     finally:
         log_sink.reset(token)
         server.shutdown()
@@ -36,10 +41,13 @@ def test_bridge_forwards_vagrant_operation_and_live_log(settings, attack):
 
 
 def test_bridge_rejects_unapproved_vagrant_args(settings):
+    assert not valid_vagrant_args(["ssh", "-c", "id"])
     path = settings.root / ".runtime" / "host-runner.sock"
+
     class Backend:
         def run(self, *args, **kwargs):
             raise AssertionError("must never execute")
+
     server = make_server(settings.root, path, Backend())
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -47,7 +55,19 @@ def test_bridge_rejects_unapproved_vagrant_args(settings):
         with socket.socket(socket.AF_UNIX) as client:
             client.connect(str(path))
             with client.makefile("rwb") as stream:
-                stream.write((json.dumps({"attack_id": "context-poisoning", "args": ["plugin", "install", "anything"], "timeout": 30, "environment": {}}) + "\n").encode())
+                stream.write(
+                    (
+                        json.dumps(
+                            {
+                                "attack_id": "context-poisoning",
+                                "args": ["plugin", "install", "anything"],
+                                "timeout": 30,
+                                "environment": {},
+                            }
+                        )
+                        + "\n"
+                    ).encode()
+                )
                 stream.flush()
                 assert json.loads(stream.readline())["type"] == "error"
     finally:
@@ -56,7 +76,9 @@ def test_bridge_rejects_unapproved_vagrant_args(settings):
         thread.join(timeout=2)
 
 
-def test_bridge_selects_initialized_escape_box_without_host_state(settings, monkeypatch):
+def test_bridge_selects_initialized_escape_box_without_host_state(
+    settings, monkeypatch
+):
     for directory in ("escapes", "vm/escape/profiles"):
         shutil.copytree(ROOT / directory, settings.root / directory)
     shutil.copyfile(ROOT / "vm/escape/setup.sh", settings.root / "vm/escape/setup.sh")
@@ -69,19 +91,56 @@ def test_bridge_selects_initialized_escape_box_without_host_state(settings, monk
 
     path = settings.root / ".runtime/host-runner.sock"
     server = make_server(settings.root, path, Backend())
-    (path.parent / "benchmark.json").write_text(json.dumps({"box": "lab/prepared", "openclaw_version": "2026.9.7"}))
+    (path.parent / "benchmark.json").write_text(
+        json.dumps(
+            {
+                "box": "lab/prepared",
+                "openclaw_version": "2026.9.7",
+                "snapshot": "agentic-lab-clean",
+            }
+        )
+    )
     monkeypatch.setenv("LAB_VAGRANT_BOX", "")
     monkeypatch.setenv("LAB_OPENCLAW_VERSION", "")
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        result = BridgeRunner(settings, path).up(Scenarios(settings.root, "escapes").load("docker-socket"))
+        result = BridgeRunner(settings, path).up(
+            Scenarios(settings.root, "escapes").load("docker-socket")
+        )
         assert result.exit_code == 0
-        assert [args[0] for args, _ in calls] == ["destroy", "up"]
+        assert [args[0] for args, _ in calls] == ["snapshot", "provision"]
         for _, environment in calls:
             assert environment["LAB_VAGRANT_BOX"] == "lab/prepared"
             assert environment["LAB_OPENCLAW_VERSION"] == "2026.9.7"
     finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_bridge_forwards_direct_remote_command(settings, attack):
+    calls = []
+
+    class Backend:
+        def remote(self, scenario, command, timeout):
+            calls.append((scenario.id, command, timeout))
+            log_sink.get()("stdout", "uid=1000\n")
+            return ExecResult(exit_code=0, stdout="uid=1000\n")
+
+    path = settings.root / ".runtime" / "host-runner.sock"
+    server = make_server(settings.root, path, Backend())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    events = []
+    token = log_sink.set(lambda stream, value: events.append((stream, value)))
+    try:
+        result = BridgeRunner(settings, path).remote(attack, "id", 45)
+        assert result.stdout == "uid=1000\n"
+        assert calls == [("context-poisoning", "id", 45)]
+        assert events == [("stdout", "uid=1000\n")]
+    finally:
+        log_sink.reset(token)
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)

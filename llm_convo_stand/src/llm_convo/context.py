@@ -1,6 +1,11 @@
 from dataclasses import dataclass
 from typing import Protocol
 
+INITIAL_AGENT_A_MESSAGE = (
+    "Begin working toward your objective using the information and constraints "
+    "in your system instructions."
+)
+
 
 class TranscriptMessage(Protocol):
     sequence: int
@@ -30,19 +35,20 @@ def render_transcript(messages: list[TranscriptMessage]) -> str:
 def build_working_context(
     *,
     system_prompt: str,
-    task_prompt: str,
     speaker: str,
     summary: str | None,
     messages: list[TranscriptMessage],
 ) -> WorkingContext:
-    sections = [f"Shared task from the user:\n{task_prompt}"]
+    payload = [{"role": "system", "content": system_prompt}]
+    if speaker == "agent_a" and not summary and not messages:
+        payload.append({"role": "user", "content": INITIAL_AGENT_A_MESSAGE})
     if summary:
-        sections.append(f"Shared summary of the earlier conversation:\n{summary}")
-
-    payload = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": "\n\n".join(sections)},
-    ]
+        payload.append(
+            {
+                "role": "user",
+                "content": f"Shared summary of the earlier conversation:\n{summary}",
+            }
+        )
     payload.extend(
         {
             "role": "assistant" if message.speaker == speaker else "user",

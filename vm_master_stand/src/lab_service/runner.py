@@ -1,21 +1,24 @@
 import base64
 import hashlib
+import ipaddress
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import threading
 import time
 from contextlib import contextmanager
+from pathlib import Path
 
 from filelock import FileLock
 
+from .benchmark import escape_config, escape_snapshot
 from .jobs import log_sink
-from .benchmark import escape_config
-from .streaming import collect
 from .models import ExecResult
 from .scenarios import repo_path
+from .streaming import collect
 
 
 def encoded_shell(command: str) -> str:
@@ -40,6 +43,8 @@ class Runner:
     def __init__(self, settings):
         """Сохраняет проверенные настройки хоста."""
         self.settings = settings
+        self._ssh_guard = threading.Lock()
+        self._ssh_targets = {}
 
     def paths(self, attack):
         """Проверяет и возвращает пути к Vagrantfile и provisioning-скрипту сценария."""
@@ -96,7 +101,11 @@ class Runner:
                 env.get("LAB_VAGRANT_BOX"),
                 env.get("LAB_OPENCLAW_VERSION"),
             )
-            env.update(LAB_VAGRANT_BOX=box, LAB_OPENCLAW_VERSION=version)
+            env.update(
+                LAB_VAGRANT_BOX=box,
+                LAB_OPENCLAW_VERSION=version,
+                LAB_ISOLATED_ESCAPE="1",
+            )
         elif not env.get("LAB_VAGRANT_BOX"):
             env["LAB_VAGRANT_BOX"] = "bento/ubuntu-24.04"
         env.update(
@@ -106,6 +115,8 @@ class Runner:
             LAB_REPO_ROOT=str(self.settings.root),
             LAB_ESCAPE_PROFILE=attack.profile if attack.mode == "escape" else "",
         )
+        if args and args[0] in {"destroy", "halt", "reload", "snapshot", "up"}:
+            self._invalidate_ssh(path)
         process = subprocess.Popen(
             ["vagrant", *args],
             cwd=path.parent,
@@ -114,6 +125,10 @@ class Runner:
             stderr=subprocess.PIPE,
             start_new_session=True,
         )
+        return self._complete(process, timeout)
+
+    def _complete(self, process, timeout):
+        """Собирает локальный процесс с live-логами и жёстким общим timeout."""
         if log_sink.get() is not None:
             return collect(process, timeout, log_sink.get())
         timed_out = False
@@ -134,34 +149,142 @@ class Runner:
             timed_out=timed_out,
         )
 
+    def _invalidate_ssh(self, path):
+        """Забывает endpoint после любого изменения состояния VM."""
+        with self._ssh_guard:
+            self._ssh_targets.pop(str(path), None)
+
+    def _ssh_target(self, attack):
+        """Один раз читает `vagrant ssh-config` и проверяет локальный endpoint."""
+        path, _ = self.paths(attack)
+        key = str(path)
+        with self._ssh_guard:
+            cached = self._ssh_targets.get(key)
+        if cached is not None:
+            return cached
+
+        # ssh-config содержит локальный путь к ключу; не отправляем его в job logs.
+        token = log_sink.set(None)
+        try:
+            result = self.run(attack, ["ssh-config"], 30)
+        finally:
+            log_sink.reset(token)
+        if result.exit_code or result.timed_out:
+            raise RuntimeError(result.stderr or "Unable to read Vagrant SSH config")
+
+        values = {}
+        identities = []
+        for line in result.stdout.splitlines():
+            parts = shlex.split(line.strip())
+            if len(parts) < 2:
+                continue
+            if parts[0] == "IdentityFile":
+                identities.append(parts[1])
+            elif parts[0] in {"HostName", "User", "Port"}:
+                values[parts[0]] = parts[1]
+        try:
+            hostname = values["HostName"]
+            if (
+                hostname != "localhost"
+                and not ipaddress.ip_address(hostname).is_loopback
+            ):
+                raise ValueError("SSH endpoint is not loopback")
+            user = values["User"]
+            if not re.fullmatch(r"[a-zA-Z0-9_.-]{1,64}", user):
+                raise ValueError("Invalid SSH user")
+            port = int(values["Port"])
+            if not 1 <= port <= 65535:
+                raise ValueError("Invalid SSH port")
+            identity_paths = tuple(str(Path(item).resolve()) for item in identities)
+            if not identity_paths or not all(
+                Path(item).is_file() for item in identity_paths
+            ):
+                raise ValueError("Invalid SSH identity")
+        except (KeyError, ValueError) as exc:
+            raise RuntimeError("Invalid Vagrant SSH config") from exc
+
+        target = (hostname, port, user, identity_paths)
+        with self._ssh_guard:
+            self._ssh_targets[key] = target
+        return target
+
+    def remote(self, attack, command, timeout):
+        """Выполняет guest-команду прямым SSH с переиспользуемым ControlMaster.
+
+        Vagrant вызывается только один раз для получения endpoint. Команда передаётся
+        отдельным argv без host shell, а SSH доступен лишь через loopback forwarded port.
+        """
+        if not isinstance(command, str) or not 0 < len(command) <= 200000:
+            raise ValueError("Invalid remote command")
+        hostname, port, user, identities = self._ssh_target(attack)
+        root_hash = hashlib.sha256(str(self.settings.root).encode()).hexdigest()[:12]
+        control_directory = Path(f"/tmp/agentic-lab-{os.getuid()}/{root_hash}")
+        control_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        control_directory.chmod(0o700)
+        argv = [
+            shutil.which("ssh") or "/usr/bin/ssh",
+            "-F",
+            "/dev/null",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "IdentitiesOnly=yes",
+            "-o",
+            "ConnectTimeout=10",
+            "-o",
+            "ControlMaster=auto",
+            "-o",
+            "ControlPersist=300",
+            "-o",
+            f"ControlPath={control_directory}/cm-%C",
+        ]
+        for identity in identities:
+            argv.extend(["-i", identity])
+        argv.extend(["-p", str(port), "--", f"{user}@{hostname}", command])
+        process = subprocess.Popen(
+            argv,
+            cwd=self.paths(attack)[0].parent,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        return self._complete(process, timeout)
+
     def up(self, attack):
         """Поднимает окружение сценария под общей lifecycle-блокировкой.
 
-        Для escape сначала удаляем прежнюю VM: агент мог изменить гостевую систему
+        Для escape восстанавливаем init-snapshot: агент мог изменить гостевую систему
         или Docker daemon, и reset контейнера не гарантирует чистый следующий прогон.
-        Ошибка destroy останавливает запуск. Затем импортируем box и выполняем
-        provisioning; подготовленный box позволяет пропустить установку и сборку.
+        Затем provisioning создаёт новый случайный флаг и контейнеры сценария.
         Исходные agent-сценарии сохраняют обычный up с повторным provisioning.
         """
         with self.transaction(attack):
             if attack.mode == "escape":
-                # Container escapes can mutate the VM and its Docker daemon.
-                # Re-import the clean box instead of trusting a previous reset.
                 started = time.monotonic()
                 emit = log_sink.get()
                 if emit:
-                    emit("system", "[lab] recreating clean escape VM from box\n")
+                    emit("system", "[lab] restoring clean escape VM snapshot\n")
+                snapshot = escape_snapshot(self.settings.root)
                 result = self.run(
-                    attack, ["destroy", "-f"], self.settings.lifecycle_timeout
+                    attack,
+                    ["snapshot", "restore", snapshot],
+                    self.settings.lifecycle_timeout,
                 )
                 if result.exit_code or result.timed_out:
                     return result
                 result = self.run(
                     attack,
-                    ["up", "--provider=virtualbox", "--provision"],
+                    ["provision"],
                     self.settings.lifecycle_timeout,
                 )
-                timing = f"[lab] clean VM + provisioning: {time.monotonic() - started:.1f}s\n"
+                timing = (
+                    "[lab] snapshot restore + provisioning: "
+                    f"{time.monotonic() - started:.1f}s\n"
+                )
                 result.stdout += "\n" + timing
                 if emit:
                     emit("system", timing)
@@ -173,8 +296,19 @@ class Runner:
             )
 
     def down(self, attack):
-        """Удаляет лабораторную VM под lifecycle-блокировкой; глобальный box-кеш остаётся."""
+        """Очищает escape VM snapshot-откатом; обычную лабораторную VM удаляет."""
         with self.transaction(attack):
+            if attack.mode == "escape":
+                return self.run(
+                    attack,
+                    [
+                        "snapshot",
+                        "restore",
+                        escape_snapshot(self.settings.root),
+                        "--no-start",
+                    ],
+                    self.settings.lifecycle_timeout,
+                )
             return self.run(attack, ["destroy", "-f"], self.settings.lifecycle_timeout)
 
     def sandbox(self, attack, request):
@@ -204,15 +338,16 @@ class Runner:
                 + attack.id
                 + ".yml"
             )
+        workspace = "/opt/agentic-lab" if attack.mode == "escape" else "/workspace"
         remote = (
-            "cd /workspace && sudo "
+            f"cd {workspace} && sudo "
             + compose
             + " exec -T "
             + service
             + f" timeout -k 2s {seconds}s sh -lc "
             + shlex.quote(encoded_shell(request.command))
         )
-        result = self.run(attack, ["ssh", "-c", remote], seconds + 10)
+        result = self.remote(attack, remote, seconds + 15)
         result.timed_out |= result.exit_code in (124, 137)
         return result
 
@@ -222,6 +357,6 @@ class Runner:
         remote = f"timeout -k 2s {seconds}s sh -lc " + shlex.quote(
             encoded_shell(request.command)
         )
-        result = self.run(attack, ["ssh", "-c", remote], seconds + 10)
+        result = self.remote(attack, remote, seconds + 15)
         result.timed_out |= result.exit_code in (124, 137)
         return result

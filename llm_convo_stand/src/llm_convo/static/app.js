@@ -104,7 +104,8 @@ function renderScenarioPreview() {
   preview.replaceChildren(
     node("strong", "", scenario.title + " · " + scenario.mode),
     node("div", "message-meta", scenario.category),
-    node("p", "", scenario.prompt),
+    node("p", "", scenario.metadata?.hint || "Agent A receives the complete scenario dossier."),
+    node("pre", "", scenario.profile_config ? JSON.stringify(scenario.profile_config, null, 2) : ""),
   );
 }
 
@@ -130,8 +131,6 @@ async function loadScenarios() {
 function toggleRunType() {
   const benchmark = $("#run-type").value === "benchmark";
   $("#benchmark-settings").classList.toggle("hidden", !benchmark);
-  $("#normal-task-field").classList.toggle("hidden", benchmark);
-  $("#normal-task-field textarea").disabled = benchmark;
   $("#scenario-id").disabled = !benchmark || !state.scenarios.length;
   $("#start-title").textContent = benchmark
     ? "Start VM benchmark"
@@ -173,7 +172,7 @@ function scheduleLangfuseRefresh() {
 function renderConversationList() {
   const list = $("#conversation-list");
   const search = $("#conversation-search").value.trim().toLowerCase();
-  const items = state.conversations.filter((item) => !search || item.task_prompt.toLowerCase().includes(search) || item.id.includes(search));
+  const items = state.conversations.filter((item) => !search || item.agent_a_system_prompt.toLowerCase().includes(search) || item.id.includes(search));
   list.replaceChildren();
   if (!items.length) {
     list.append(node("div", "empty-list", "No conversations found."));
@@ -184,7 +183,7 @@ function renderConversationList() {
     card.dataset.id = item.id;
     const top = node("div", "conversation-card-top");
     top.append(node("span", `status-pill ${item.status}`, statusLabel(item.status)), node("span", "message-meta", `${item.turn_count} turns`));
-    card.append(top, node("div", "conversation-card-title", item.task_prompt));
+    card.append(top, node("div", "conversation-card-title", item.agent_a_system_prompt));
     const meta = node("div", "conversation-card-meta");
     meta.append(node("span", "", shortId(item.id)), node("span", "", fmtDate(item.updated_at)));
     card.append(meta);
@@ -259,11 +258,12 @@ function renderHeader() {
   const convo = state.conversation;
   if (!convo) return;
   const benchmark = state.benchmark;
-  $("#conversation-title").textContent = compact(convo.task_prompt, 92);
+  const agentAPrompt = convo.config.agent_a.system_prompt;
+  $("#conversation-title").textContent = compact(agentAPrompt, 92);
   $("#conversation-meta").textContent = benchmark
     ? shortId(convo.id) + " · " + benchmark.scenario_id + " · " + statusLabel(benchmark.stage)
     : shortId(convo.id) + " · " + statusLabel(convo.status) + " · next " + convo.next_speaker;
-  $("#task-prompt").textContent = convo.task_prompt;
+  $("#agent-a-prompt").textContent = agentAPrompt;
   const isTerminal = terminalStatuses.has(convo.status);
   $("#stop-conversation").classList.toggle("hidden", Boolean(benchmark) || isTerminal);
   $("#finish-benchmark").classList.toggle(
@@ -337,7 +337,7 @@ function currentActivity() {
     }
     if (run.stage === "provisioning") {
       const detail = cleanActivityText(latestVmLog("up")?.payload?.text);
-      return { tone: "active", title: "Preparing VM", detail: detail || "Starting Vagrant and provisioning the scenario" };
+      return { tone: "active", title: "Preparing VM", detail: detail || "Restoring the clean snapshot and provisioning the scenario" };
     }
     if (run.stage === "conversation") {
       return { tone: "active", title: "Conversation active", detail: `Waiting for ${convo.next_speaker === "agent_a" ? "Agent A" : "Agent B"} · turn ${convo.turn_count + 1}` };
@@ -347,7 +347,7 @@ function currentActivity() {
     }
     if (run.stage === "cleaning_up") {
       const detail = cleanActivityText(latestVmLog("down")?.payload?.text);
-      return { tone: "active", title: "Cleaning up VM", detail: detail || "Waiting for Vagrant to destroy the VM" };
+      return { tone: "active", title: "Cleaning up VM", detail: detail || "Restoring the clean snapshot and powering off the VM" };
     }
     if (["failed", "cleanup_failed"].includes(run.stage)) {
       return { tone: "error", title: "Benchmark failed", detail: run.error || run.cleanup_error || "See benchmark details" };
@@ -408,6 +408,110 @@ function messageElement(message, live = false) {
   return article;
 }
 
+function reactStepElement(event) {
+  const article = messageElement({
+    sequence: event.payload.message_sequence,
+    speaker: "agent_b",
+    model: `reasoning step ${event.payload.step}`,
+    content: event.payload.content,
+  }, true);
+  article.classList.remove("live");
+  article.classList.add("react-step");
+  article.removeAttribute("data-sequence");
+  return article;
+}
+
+function toolTimelineRecords() {
+  const records = new Map();
+  for (const event of state.events) {
+    const payload = event.payload || {};
+    const id = payload.tool_call_id;
+    if (!id) continue;
+    if (event.event_type === "tool_started") {
+      records.set(id, { id, started: event, logs: [], completed: null });
+    } else if (event.event_type === "vm_job_log" && payload.action === "sandbox") {
+      const record = records.get(id);
+      if (record) record.logs.push(event);
+    } else if (event.event_type === "tool_completed") {
+      const record = records.get(id);
+      if (record) record.completed = event;
+    }
+  }
+  return [...records.values()];
+}
+
+function toolTimelineElement(record) {
+  const started = record.started.payload;
+  const completed = record.completed?.payload;
+  const status = completed?.status || "running";
+  const article = node("article", `message tool-message ${status}`);
+  article.append(node("div", "avatar tool-avatar", ">_"));
+  const body = node("div", "message-body");
+  const head = node("div", "message-head");
+  head.append(
+    node("span", "message-name", `Terminal #${started.message_sequence}.${started.ordinal}`),
+    node("span", `status-pill ${status}`, statusLabel(status)),
+  );
+  const command = node("pre", "tool-command", String(started.arguments?.command || ""));
+  body.append(head, command);
+
+  const output = record.logs
+    .map((item) => {
+      const stream = item.payload?.stream;
+      const prefix = stream === "stderr" ? "[stderr] " : "";
+      return prefix + String(item.payload?.text || "");
+    })
+    .join("");
+  const fallback = completed?.result
+    ? [completed.result.stdout, completed.result.stderr].filter(Boolean).join("\n")
+    : completed?.error || "";
+  const visibleOutput = cleanActivityText(output || fallback);
+  if (visibleOutput) body.append(node("pre", "tool-output", visibleOutput));
+
+  if (completed?.result) {
+    const result = completed.result;
+    body.append(node(
+      "div",
+      "message-metrics",
+      `exit ${result.exit_code} · timed out: ${result.timed_out ? "yes" : "no"}`,
+    ));
+  } else if (completed?.error) {
+    body.append(node("div", "inline-error", completed.error));
+  }
+  article.append(body);
+  return article;
+}
+
+function conversationTimeline() {
+  const items = state.messages.map((message, index) => ({
+    time: Date.parse(message.created_at || 0),
+    order: index,
+    element: messageElement(message),
+  }));
+  state.events.forEach((event, index) => {
+    if (
+      event.event_type === "agent_react_step"
+      && !event.payload?.final
+      && event.payload?.content
+    ) {
+      items.push({
+        time: Date.parse(event.created_at || 0),
+        order: 10_000 + index,
+        element: reactStepElement(event),
+      });
+    }
+  });
+  toolTimelineRecords().forEach((record, index) => {
+    items.push({
+      time: Date.parse(record.started.created_at || 0),
+      order: 20_000 + index,
+      element: toolTimelineElement(record),
+    });
+  });
+  items.sort((left, right) => left.time - right.time || left.order - right.order);
+  return items.map((item) => item.element);
+}
+
 function messageListIsAtBottom() {
   const container = $("#message-stream");
   return container.scrollHeight - container.scrollTop - container.clientHeight <= 2;
@@ -430,10 +534,12 @@ function renderTypingState() {
 function renderMessages({ scrollToBottom = true } = {}) {
   const container = $("#message-stream");
   const shouldScroll = scrollToBottom || state.followLiveOutput;
-  container.replaceChildren(...state.messages.map((message) => messageElement(message)));
+  const previousScrollTop = container.scrollTop;
+  container.replaceChildren(...conversationTimeline());
   if (state.liveDraft) container.append(messageElement({ ...state.liveDraft, model: state.liveDraft.model || "generating" }, true));
   renderTypingState();
   if (shouldScroll) scrollMessagesToBottom();
+  else container.scrollTop = previousScrollTop;
 }
 
 function beginLiveMessage(data) {
@@ -685,6 +791,7 @@ function connectEventSource(id) {
     "benchmark_stage_changed",
     "vm_job_log",
     "vm_job_completed",
+    "agent_react_step",
     "tool_started",
     "tool_completed",
     "benchmark_flag_submitted",
@@ -699,6 +806,7 @@ function connectEventSource(id) {
         await loadBenchmark(id, { refreshConversation: true });
         state.events = await api("/v1/conversations/" + id + "/events?limit=5000");
         renderActivity();
+        renderMessages({ scrollToBottom: state.followLiveOutput });
         renderEvents();
       } catch (_) { /* next reconciliation will recover */ }
     });
@@ -806,7 +914,7 @@ async function startConversation(event) {
         max_tool_calls_per_b_turn: Number(values.max_tool_calls_per_b_turn),
         max_rounds: Number(values.max_rounds),
       }
-    : { ...common, task_prompt: values.task_prompt };
+    : common;
   try {
     if (benchmark && !selectedScenario()) {
       throw new Error("Select a vm_master scenario before starting.");

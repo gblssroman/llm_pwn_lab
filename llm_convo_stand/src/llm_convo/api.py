@@ -67,7 +67,7 @@ def _conversation_summary(conversation: Conversation) -> ConversationSummary:
     return ConversationSummary(
         id=conversation.id,
         status=conversation.status,
-        task_prompt=conversation.task_prompt,
+        agent_a_system_prompt=conversation.config["agent_a"]["system_prompt"],
         turn_count=conversation.turn_count,
         next_speaker=conversation.next_speaker,
         created_at=conversation.created_at,

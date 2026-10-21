@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="dark" />
     <title>Agent Relay</title>
-    <link rel="stylesheet" href="/assets/app.css?v=vm-benchmark-2" />
+    <link rel="stylesheet" href="/assets/app.css?v=vm-benchmark-3" />
   </head>
   <body>
     <div class="app-shell">
@@ -72,9 +72,9 @@
         <section class="conversation-view hidden" id="conversation-view">
           <div class="activity-row idle" id="activity-row"></div>
           <div class="stats-row" id="stats-row"></div>
-          <div class="task-card">
-            <span>Task prompt</span>
-            <p id="task-prompt"></p>
+          <div class="agent-prompt-card">
+            <span>Agent A system prompt</span>
+            <p id="agent-a-prompt"></p>
           </div>
           <div class="message-stream" id="message-stream" tabindex="0"></div>
           <div class="typing-banner hidden" id="typing-banner">
@@ -133,11 +133,6 @@
           </div>
           <p class="field-help">Agent A speaks first. Agent B can call vm_master terminal tools; the budget resets on every B turn.</p>
         </section>
-
-        <label class="field full hidden" id="normal-task-field">
-          <span>Task prompt</span>
-          <textarea name="task_prompt" required rows="4" placeholder="What should the agents discuss or solve?"></textarea>
-        </label>
 
         <section class="agent-config agent-a">
           <h3>Agent A</h3>
@@ -211,6 +206,6 @@
 
     <div class="toast" id="toast"></div>
     <script src="/assets/markdown.js?v=vm-benchmark-1" defer></script>
-    <script src="/assets/app.js?v=vm-benchmark-3" defer></script>
+    <script src="/assets/app.js?v=vm-benchmark-4" defer></script>
   </body>
 </html>

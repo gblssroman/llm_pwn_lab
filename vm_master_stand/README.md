@@ -306,14 +306,16 @@ Internal-сеть не имеет internet-egress: облачный LLM API из
 - Это исследовательский MVP, не защита от kernel/hypervisor exploits. Sandbox:
   non-root, read-only rootfs, cap_drop, no-new-privileges, tmpfs, CPU/RAM/PID limits.
   Fixtures — единственный разрешённый read-only bind; репозиторий целиком не монтируется.
-- Репозиторий доступен в VM read-only как `/workspace`; evaluator полностью доверен.
+- Для исходных agent-сценариев репозиторий доступен в VM read-only как `/workspace`.
+  Escape-VM использует запечённую копию `/opt/agentic-lab` без host mount;
+  evaluator полностью доверен.
   Tool API работает root в ограниченном контейнере для чтения root-only grant,
   не получает Docker socket и не принимает команды/SQL через HTTP.
 - Remote timeout ограничивает обычные дочерние процессы, локально уничтожается
   группа Vagrant/SSH. Намеренно отделившиеся процессы и изменения target требуют
   reset VM. Вывод буферизуется: не запускайте бесконечный вывод.
 - После таймаута provisioning VM может остаться частично запущенной: выполните down.
-  Down уничтожает disposable VM, но скачанный Vagrant box остаётся в глобальном cache.
+  Для escape down откатывает чистый snapshot и выключает VM; agent-VM удаляется.
 - Docker images и box имеют version tags, не digest. Для воспроизводимых прогонов
   дополнительно закрепите digest и box version.
 - Не публикуйте control API наружу. TLS, multi-tenant isolation, rate limiting,

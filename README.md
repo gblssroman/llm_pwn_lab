@@ -3,7 +3,7 @@
 Стенд связывает два проекта:
 
 - `llm_convo_stand` — диалог Agent A/Agent B, история, PostgreSQL и Langfuse;
-- `vm_master_stand` — одноразовые VirtualBox/Vagrant VM и sandbox-инструменты Agent B.
+- `vm_master_stand` — изолированная VirtualBox/Vagrant VM и sandbox-инструменты Agent B.
 
 ## Первый запуск
 
@@ -20,9 +20,13 @@ make integration-init
 ```
 
 `benchmark init` долгий только при первой сборке или изменении входных файлов:
-он заранее устанавливает зависимости и сохраняет подготовленный box. Повторный
-init использует кеш. `integration-init` создаёт `.env.vm-master` с локальными
-токенами и UID/GID пользователя.
+он сохраняет подготовленный box, создаёт runtime VM и выключенный чистый snapshot.
+Повторный init использует box и snapshot из кеша. `integration-init` создаёт
+`.env.vm-master` с локальными токенами и UID/GID пользователя.
+
+Каждый benchmark последовательно восстанавливает snapshot, создаёт новый флаг и
+запускает выбранный профиль. После прогона snapshot восстанавливается ещё раз,
+а VM остаётся выключенной. Host-репозиторий в escape-VM не монтируется.
 
 ## Запуск
 
@@ -78,4 +82,5 @@ make integration-down
 ```
 
 Перед `integration-down` завершите активный benchmark через **Finish** или
-**Abort**: остановка Docker-контейнеров сама по себе не удаляет запущенную VM.
+**Abort**: это откатит VM к чистому snapshot и выключит её. Простая остановка
+Docker-контейнеров не завершает уже запущенную VM.

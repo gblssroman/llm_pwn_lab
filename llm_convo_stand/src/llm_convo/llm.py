@@ -324,6 +324,10 @@ class OpenAICompatibleClient:
             json=payload,
             timeout=config.request_timeout_seconds,
         ) as response:
+            if not response.is_success:
+                # HTTPX does not buffer bodies opened through ``stream()``. Read an
+                # error response before _raise_for_status inspects its JSON/text.
+                await response.aread()
             _raise_for_status(response, streaming=True)
             if on_stream_start:
                 try:

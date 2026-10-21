@@ -4,6 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from llm_convo.context import (
+    INITIAL_AGENT_A_MESSAGE,
     build_compression_messages,
     build_working_context,
     estimate_tokens,
@@ -19,10 +20,23 @@ class Item:
     content: str
 
 
+def test_empty_agent_a_context_has_a_technical_user_kickoff() -> None:
+    result = build_working_context(
+        system_prompt="Private objective and scenario dossier.",
+        speaker="agent_a",
+        summary=None,
+        messages=[],
+    )
+
+    assert result.messages == [
+        {"role": "system", "content": "Private objective and scenario dossier."},
+        {"role": "user", "content": INITIAL_AGENT_A_MESSAGE},
+    ]
+
+
 def test_working_context_maps_history_from_agent_b_perspective() -> None:
     result = build_working_context(
         system_prompt="You are the critic.",
-        task_prompt="Reach a decision.",
         speaker="agent_b",
         summary="A proposed option X.",
         messages=[
@@ -36,10 +50,7 @@ def test_working_context_maps_history_from_agent_b_perspective() -> None:
         {"role": "system", "content": "You are the critic."},
         {
             "role": "user",
-            "content": (
-                "Shared task from the user:\nReach a decision.\n\n"
-                "Shared summary of the earlier conversation:\nA proposed option X."
-            ),
+            "content": "Shared summary of the earlier conversation:\nA proposed option X.",
         },
         {"role": "user", "content": "Use X."},
         {"role": "assistant", "content": "Why?"},
@@ -51,7 +62,6 @@ def test_working_context_maps_history_from_agent_b_perspective() -> None:
 def test_working_context_maps_history_from_agent_a_perspective() -> None:
     result = build_working_context(
         system_prompt="Private instructions for A.",
-        task_prompt="Debate the proposal.",
         speaker="agent_a",
         summary=None,
         messages=[
@@ -62,7 +72,6 @@ def test_working_context_maps_history_from_agent_a_perspective() -> None:
 
     assert result.messages == [
         {"role": "system", "content": "Private instructions for A."},
-        {"role": "user", "content": "Shared task from the user:\nDebate the proposal."},
         {"role": "assistant", "content": "Initial proposal."},
         {"role": "user", "content": "Counterargument."},
     ]
@@ -71,7 +80,6 @@ def test_working_context_maps_history_from_agent_a_perspective() -> None:
 def test_working_context_has_only_the_current_agents_system_prompt() -> None:
     result = build_working_context(
         system_prompt="Only agent B's private prompt.",
-        task_prompt="Shared task.",
         speaker="agent_b",
         summary="Shared facts only.",
         messages=[Item(1, "agent_a", "Visible reply from A.")],
@@ -121,7 +129,6 @@ def test_start_request_rejects_an_impossible_initial_context() -> None:
     )
     with pytest.raises(ValidationError, match="does not fit"):
         StartConversationRequest(
-            task_prompt="task",
             agent_a=agent,
             agent_b=agent,
             context_size=1024,
@@ -140,7 +147,6 @@ def test_start_request_uses_each_agents_context_limit() -> None:
 
     with pytest.raises(ValidationError, match="agent_a"):
         StartConversationRequest(
-            task_prompt="task",
             agent_a=constrained,
             agent_b=unconstrained,
             context_size=32768,

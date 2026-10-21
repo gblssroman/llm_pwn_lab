@@ -17,9 +17,9 @@ async def service():
     await engine.dispose()
 
 
-def request(task: str = "Discuss") -> StartConversationRequest:
-    agent = AgentConfig(system_prompt="You are helpful", api_key_env=None)
-    return StartConversationRequest(task_prompt=task, agent_a=agent, agent_b=agent)
+def request(objective: str = "Discuss") -> StartConversationRequest:
+    agent = AgentConfig(system_prompt=f"You are helpful. {objective}", api_key_env=None)
+    return StartConversationRequest(agent_a=agent, agent_b=agent)
 
 
 @pytest.mark.asyncio
@@ -51,7 +51,7 @@ async def test_agent_specific_provider_and_generation_settings_are_persisted(
         parameters=GenerationParameters(temperature=1.1, max_tokens=222),
     )
     created = await service.create(
-        StartConversationRequest(task_prompt="Discuss", agent_a=agent_a, agent_b=agent_b),
+        StartConversationRequest(agent_a=agent_a, agent_b=agent_b),
         "different-agents",
     )
 
@@ -98,6 +98,9 @@ async def test_list_conversations_supports_history_and_status_filter(
     )
 
     assert total == 2
-    assert [item.task_prompt for item in all_items] == ["second", "first"]
+    assert [item.config["agent_a"]["system_prompt"] for item in all_items] == [
+        "You are helpful. second",
+        "You are helpful. first",
+    ]
     assert stopped_total == 1
     assert stopped[0].id == first.conversation.id

@@ -46,7 +46,6 @@ class ConversationService:
                 return CreateResult(existing, True)
 
             conversation = Conversation(
-                task_prompt=request.task_prompt,
                 config=request.persistent_config(),
                 context_size=request.context_size,
                 compression_threshold=request.compression_threshold,

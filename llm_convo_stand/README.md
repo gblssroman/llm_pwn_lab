@@ -111,15 +111,14 @@ make integration-down
 
 ## Запуск разговора
 
-`task_prompt` — исходная пользовательская задача. Первой отвечает `agent_a`,
-затем стороны чередуются после каждой реплики.
+У каждого агента собственный `system_prompt` с его ролью и objective. Общего
+task prompt нет. Первой отвечает `agent_a`, затем стороны чередуются.
 
 ```bash
 curl -sS http://localhost:8990/v1/conversations \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: demo-001' \
   -d '{
-    "task_prompt": "Обсудите плюсы и минусы event sourcing и придите к рекомендации.",
     "context_size": 32768,
     "compression_threshold": 0.9,
     "retain_recent_messages": 4,
@@ -168,9 +167,9 @@ curl -sS -X POST http://localhost:8990/v1/conversations/CONVERSATION_ID/end
 
 `GET /v1/conversations` возвращает пагинированную историю диалогов. SSE endpoint
 отправляет `turn_started`, `turn_stream_started`, `turn_delta`, `turn_completed`,
-изменения статуса и события сжатия. Token chunks являются оперативными событиями,
-а завершённые сообщения сохраняются в PostgreSQL и восстанавливаются после
-переподключения браузера.
+изменения статуса и события сжатия. В benchmark также приходят durable
+`agent_react_step`, `tool_started`, `vm_job_log` и `tool_completed`, поэтому текст
+Agent B, terminal-вызов и его вывод видны последовательно и после reload.
 
 Также оставлены короткие алиасы `POST /start_convo` и
 `POST /end_convo/{conversation_id}`. Канонические маршруты находятся под `/v1`.
@@ -183,7 +182,7 @@ Swagger UI: `http://localhost:8990/docs`.
 реплики суммаризируются. В рабочий prompt входят:
 
 1. собственный system prompt текущего агента;
-2. общая исходная задача и последнее summary;
+2. последнее summary, если контекст уже сжимался;
 3. последние `retain_recent_messages` полных реплик как отдельные chat messages.
 
 История строится отдельно для каждой стороны. Собственные прошлые реплики

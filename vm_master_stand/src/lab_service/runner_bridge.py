@@ -2,13 +2,13 @@
 
 import json
 import os
-from pathlib import Path
 import socket
 import socketserver
 import threading
+from pathlib import Path
 
+from .benchmark import escape_config, escape_snapshot, valid_snapshot_name
 from .jobs import log_sink
-from .benchmark import escape_config
 from .models import ExecResult
 from .runner import Runner
 from .scenarios import Scenarios
@@ -17,34 +17,45 @@ _ALLOWED_ENV = ("LAB_VAGRANT_BOX", "LAB_OPENCLAW_VERSION", "LAB_OPENCLAW_COMMAND
 
 
 def valid_vagrant_args(args):
-    """Разрешает только lifecycle, status или одну SSH-команду ограниченной длины."""
+    """Разрешает только фиксированные lifecycle/status операции Vagrant."""
     if args in (
         ["up", "--provider=virtualbox", "--provision"],
         ["destroy", "-f"],
         ["status", "--machine-readable"],
+        ["provision"],
     ):
         return True
-    if not isinstance(args, list) or len(args) != 3:
-        return False
-    if args[:2] != ["ssh", "-c"]:
-        return False
-    command = args[2]
-    return isinstance(command, str) and 0 < len(command) <= 200000
+    return (
+        isinstance(args, list)
+        and len(args) in (3, 4)
+        and args[:2] == ["snapshot", "restore"]
+        and isinstance(args[2], str)
+        and valid_snapshot_name(args[2])
+        and (len(args) == 3 or args[3] == "--no-start")
+    )
 
 
 def _validate_request(request):
     """Проверяет форму сообщения, разрешённую команду и ограниченный environment."""
-    fields = {"attack_id", "args", "timeout", "environment"}
-    if not isinstance(request, dict) or set(request) != fields:
+    if not isinstance(request, dict):
+        raise ValueError("Invalid bridge request")
+    fields = set(request)
+    if fields == {"attack_id", "args", "timeout", "environment"}:
+        if not valid_vagrant_args(request["args"]):
+            raise ValueError("Unsupported Vagrant operation")
+        operation = "vagrant"
+    elif fields == {"attack_id", "command", "timeout", "environment"}:
+        command = request["command"]
+        if not isinstance(command, str) or not 0 < len(command) <= 200000:
+            raise ValueError("Unsupported remote operation")
+        operation = "remote"
+    else:
         raise ValueError("Invalid bridge request")
 
-    args = request["args"]
     timeout = request["timeout"]
-    if not valid_vagrant_args(args):
-        raise ValueError("Unsupported Vagrant operation")
     # bool — подкласс int в Python, но не допустимое значение timeout.
     if type(timeout) is not int or not 1 <= timeout <= 7300:
-        raise ValueError("Unsupported Vagrant operation")
+        raise ValueError("Unsupported bridge timeout")
 
     environment = request["environment"]
     if not isinstance(environment, dict):
@@ -52,6 +63,7 @@ def _validate_request(request):
     for key, value in environment.items():
         if key not in _ALLOWED_ENV or not isinstance(value, str) or len(value) > 4096:
             raise ValueError("Unsupported Vagrant environment")
+    return operation
 
 
 class BridgeRunner(Runner):
@@ -62,15 +74,8 @@ class BridgeRunner(Runner):
         super().__init__(settings)
         self.socket_path = str(socket_path)
 
-    def run(self, attack, args, timeout):
-        """Отправляет одну операцию хосту и читает поток JSON-сообщений.
-
-        Одно сообщение — одна строка. event направляется в журнал текущей задачи,
-        result завершает операцию, error становится RuntimeError для API. Через
-        environment передаём только разрешённые настройки box/OpenClaw, без токенов.
-        Инициализированный box выбираем и на стороне UI, чтобы старый host runner
-        получил уже разрешённые значения вместо пустых overrides.
-        """
+    def _environment(self, attack):
+        """Возвращает только разрешённые host-runner overrides."""
         environment = {
             key: os.environ[key] for key in _ALLOWED_ENV if key in os.environ
         }
@@ -83,12 +88,17 @@ class BridgeRunner(Runner):
             environment.update(LAB_VAGRANT_BOX=box, LAB_OPENCLAW_VERSION=version)
         elif not environment.get("LAB_VAGRANT_BOX"):
             environment["LAB_VAGRANT_BOX"] = "bento/ubuntu-24.04"
-        request = {
-            "attack_id": attack.id,
-            "args": args,
-            "timeout": timeout,
-            "environment": environment,
-        }
+        return environment
+
+    def _send(self, request, timeout):
+        """Отправляет одну Vagrant/SSH операцию и читает поток JSON-сообщений.
+
+        Одно сообщение — одна строка. event направляется в журнал текущей задачи,
+        result завершает операцию, error становится RuntimeError для API. Через
+        environment передаём только разрешённые настройки box/OpenClaw, без токенов.
+        Инициализированный box выбираем и на стороне UI, чтобы старый host runner
+        получил уже разрешённые значения вместо пустых overrides.
+        """
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
                 connection.settimeout(timeout + 30)
@@ -111,6 +121,26 @@ class BridgeRunner(Runner):
                 f"Host runner unavailable at {self.socket_path}: {exc}"
             ) from exc
         raise RuntimeError("Host runner closed the connection without a result")
+
+    def run(self, attack, args, timeout, environment=None):
+        """Передаёт разрешённую lifecycle/status операцию Vagrant хосту."""
+        request = {
+            "attack_id": attack.id,
+            "args": args,
+            "timeout": timeout,
+            "environment": environment or self._environment(attack),
+        }
+        return self._send(request, timeout)
+
+    def remote(self, attack, command, timeout):
+        """Передаёт guest-команду host runner для прямого SSH, минуя Vagrant CLI."""
+        request = {
+            "attack_id": attack.id,
+            "command": command,
+            "timeout": timeout,
+            "environment": self._environment(attack),
+        }
+        return self._send(request, timeout)
 
 
 class _Handler(socketserver.StreamRequestHandler):
@@ -140,8 +170,8 @@ class _Handler(socketserver.StreamRequestHandler):
             if not line or len(line) > 262144:
                 raise ValueError("Invalid bridge request size")
             request = json.loads(line)
-            _validate_request(request)
-            args, timeout = request["args"], request["timeout"]
+            operation = _validate_request(request)
+            timeout = request["timeout"]
             extra = request["environment"]
             try:
                 attack = self.server.scenarios.load(request["attack_id"])
@@ -154,9 +184,20 @@ class _Handler(socketserver.StreamRequestHandler):
 
             token = log_sink.set(emit)
             try:
-                result = self.server.runner.run(
-                    attack, args, timeout, environment=extra
-                )
+                if operation == "vagrant":
+                    args = request["args"]
+                    if args[:2] == ["snapshot", "restore"] and (
+                        attack.mode != "escape"
+                        or args[2] != escape_snapshot(self.server.root)
+                    ):
+                        raise ValueError("Unsupported VM snapshot")
+                    result = self.server.runner.run(
+                        attack, args, timeout, environment=extra
+                    )
+                else:
+                    result = self.server.runner.remote(
+                        attack, request["command"], timeout
+                    )
             finally:
                 log_sink.reset(token)
             send({"type": "result", "result": result.model_dump()})
@@ -186,6 +227,7 @@ def make_server(root: Path, socket_path: Path, runner):
     server = _Server(str(socket_path), _Handler)
     socket_path.chmod(0o600)
     server.runner = runner
+    server.root = root
     server.scenarios = Scenarios(root)
     server.escapes = Scenarios(root, "escapes")
     return server

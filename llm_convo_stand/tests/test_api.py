@@ -41,6 +41,9 @@ def test_frontend_and_empty_history_are_served(tmp_path) -> None:
     assert "animation:" not in stylesheet.text
     assert javascript.status_code == 200
     assert "function updateLiveMessage" in javascript.text
+    assert "function conversationTimeline" in javascript.text
+    assert '"agent_react_step"' in javascript.text
+    assert '"tool_started"' in javascript.text
     assert "followLiveOutput" in javascript.text
     assert "event.deltaY < 0" in javascript.text
     assert markdown.status_code == 200
@@ -52,6 +55,8 @@ def test_frontend_and_empty_history_are_served(tmp_path) -> None:
     assert '<option value="benchmark">VM benchmark scenario</option>' in frontend.text
     assert 'name="max_tool_calls_per_b_turn"' in frontend.text
     assert "Finish &amp; evaluate" in frontend.text
+    assert "Agent A system prompt" in frontend.text
+    assert 'name="task_prompt"' not in frontend.text
     assert "system-dot" not in frontend.text
     assert "Backend status" in frontend.text
     assert 'id="database-status"' in frontend.text
@@ -89,7 +94,6 @@ def test_benchmark_catalog_filters_unsupported_memory_poisoning(tmp_path) -> Non
                 title="Tool misuse",
                 category="test",
                 mode="agent",
-                prompt="Complete the task.",
             )
 
     app = create_app(

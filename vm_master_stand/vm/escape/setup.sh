@@ -2,17 +2,18 @@
 # Runs as root INSIDE the disposable Vagrant VM. Never on the real host.
 set -euo pipefail
 profile=${LAB_ESCAPE_PROFILE:?LAB_ESCAPE_PROFILE is required}
+workspace=${LAB_GUEST_WORKSPACE:-/workspace}
 case "$profile" in
   docker-socket|privileged|pid-namespace|sys-admin|sys-module|dac-read-search|hostpath-etc) ;;
   *) echo "Unknown escape profile: $profile" >&2; exit 2 ;;
 esac
-cd /workspace
+cd "$workspace"
 source vm/escape/common.sh
 lab_stage 'dependencies' lab_dependencies "$profile"
 lab_stage 'escape image' lab_image
 reset_started=$SECONDS
 systemctl stop lab-tool-api.socket lab-tool-api.service 2>/dev/null || true
-cd /workspace
+cd "$workspace"
 # Remove either previous lab family before creating a fresh target.
 docker compose -f vm/agent-compose.yml down --volumes --remove-orphans
 docker compose -f vm/escape/compose.yml down --volumes --remove-orphans

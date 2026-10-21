@@ -39,6 +39,7 @@ TERMINAL_TOOLS = [
 
 Completion = Callable[[list[dict[str, Any]], list[dict[str, Any]] | None], Awaitable[LLMResult]]
 TerminalExecutor = Callable[[ToolCall, int], Awaitable[dict[str, Any]]]
+ModelObserver = Callable[[LLMResult, int], Awaitable[None]]
 
 
 class TerminalArguments(BaseModel):
@@ -127,9 +128,15 @@ def _aggregate(results: list[LLMResult], tool_calls_used: int) -> LLMResult:
 class AgentBReactGraph:
     """A bounded LangGraph ReAct loop for Agent B and the vm_master terminal."""
 
-    def __init__(self, complete: Completion, execute_terminal: TerminalExecutor) -> None:
+    def __init__(
+        self,
+        complete: Completion,
+        execute_terminal: TerminalExecutor,
+        observe_model: ModelObserver | None = None,
+    ) -> None:
         self._complete = complete
         self._execute_terminal = execute_terminal
+        self._observe_model = observe_model
         builder = StateGraph(ReactState)
         builder.add_node("model", self._model)
         builder.add_node("tools", self._tools)
@@ -150,6 +157,8 @@ class AgentBReactGraph:
 
     async def _model(self, state: ReactState) -> ReactState:
         result = await self._complete(state["messages"], TERMINAL_TOOLS)
+        if self._observe_model is not None:
+            await self._observe_model(result, len(state.get("model_results", [])) + 1)
         return {
             **state,
             "messages": [*state["messages"], _assistant_message(result)],
@@ -218,6 +227,8 @@ class AgentBReactGraph:
             },
         ]
         result = await self._complete(messages, None)
+        if self._observe_model is not None:
+            await self._observe_model(result, len(state.get("model_results", [])) + 1)
         return {
             **state,
             "messages": [*messages, _assistant_message(result)],

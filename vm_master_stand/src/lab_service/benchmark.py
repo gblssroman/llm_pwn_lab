@@ -3,14 +3,14 @@
 import argparse
 import hashlib
 import json
-import sys
-from datetime import datetime, timezone
 import os
-from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
+from datetime import UTC, datetime
+from pathlib import Path
 
 from filelock import FileLock
 
@@ -18,13 +18,24 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_BOX = "bento/ubuntu-24.04"
 DEFAULT_OPENCLAW_VERSION = "2026.9.6"
 PREPARATION_TIMEOUT = 7200
+SNAPSHOT_NAME = "agentic-lab-clean"
 
 # Изменение любого из этих файлов требует новой подготовки VM-образа.
 BOX_INPUTS = (
     "vagrant/Vagrantfile",
     "vm/escape/common.sh",
     "vm/escape/prepare-box.sh",
+    "vm/escape/setup.sh",
     "vm/escape/Dockerfile",
+    "vm/escape/compose.yml",
+    "vm/escape/profiles/dac-read-search.yml",
+    "vm/escape/profiles/docker-socket.yml",
+    "vm/escape/profiles/hostpath-etc.yml",
+    "vm/escape/profiles/pid-namespace.yml",
+    "vm/escape/profiles/privileged.yml",
+    "vm/escape/profiles/sys-admin.yml",
+    "vm/escape/profiles/sys-module.yml",
+    "vm/agent-compose.yml",
     "vm/openclaw-adapter/adapter.py",
 )
 
@@ -126,6 +137,28 @@ def escape_config(root, box_override=None, version_override=None):
         raise RuntimeError("Invalid benchmark state; run benchmark init again") from exc
 
 
+def escape_snapshot(root):
+    """Возвращает имя проверенного чистого snapshot для escape-прогонов."""
+    state = root / ".runtime/benchmark.json"
+    try:
+        data = json.loads(state.read_text())
+        snapshot = data["snapshot"]
+        if not isinstance(snapshot, str) or not valid_snapshot_name(snapshot):
+            raise ValueError("Invalid snapshot name")
+        return snapshot
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise RuntimeError(
+            "Clean VM snapshot is missing; run benchmark init again"
+        ) from exc
+
+
+def valid_snapshot_name(value):
+    """Ограничивает snapshot безопасным именем, передаваемым Vagrant как argv."""
+    return 0 < len(value) <= 64 and all(
+        character.isalnum() or character in "._-" for character in value
+    )
+
+
 def selected_box(root, override=None):
     """Возвращает только имя box; используется при проверке CLI перед запуском."""
     return escape_config(root, override)[0]
@@ -190,6 +223,83 @@ def _save_state(state_path, data):
     os.replace(temporary_path, state_path)
 
 
+def _runtime_environment(root, box_name, version):
+    """Строит окружение единственной изолированной benchmark VM."""
+    environment = {
+        key: value for key, value in os.environ.items() if not key.startswith("LAB_")
+    }
+    environment.update(
+        VAGRANT_CWD=str(root / "vagrant"),
+        VAGRANT_VAGRANTFILE="Vagrantfile",
+        LAB_REPO_ROOT=str(root),
+        LAB_SETUP_SCRIPT=str(root / "vm/escape/setup.sh"),
+        LAB_VAGRANT_BOX=box_name,
+        LAB_OPENCLAW_VERSION=version,
+        LAB_OPENCLAW_COMMAND="",
+        LAB_ESCAPE_PROFILE="",
+        LAB_ISOLATED_ESCAPE="1",
+    )
+    return environment
+
+
+def _runtime_vagrant(root, environment, *args, capture=False):
+    """Запускает один ограниченный шаг подготовки runtime VM."""
+    started = time.monotonic()
+    print(f"[vm] starting: {' '.join(args)}", flush=True)
+    try:
+        return subprocess.run(
+            ["vagrant", *args],
+            cwd=root / "vagrant",
+            env=environment,
+            check=True,
+            timeout=PREPARATION_TIMEOUT,
+            capture_output=capture,
+            text=capture,
+        )
+    finally:
+        print(f"[vm] {args[0]}: {time.monotonic() - started:.1f}s", flush=True)
+
+
+def _snapshot_available(root, box_name, version, snapshot):
+    """Проверяет, что runtime VM существует и содержит нужный snapshot."""
+    if not isinstance(snapshot, str) or not valid_snapshot_name(snapshot):
+        return False
+    environment = _runtime_environment(root, box_name, version)
+    try:
+        status = _runtime_vagrant(
+            root, environment, "status", "--machine-readable", capture=True
+        )
+        if ",state,not_created" in status.stdout:
+            return False
+        snapshots = _runtime_vagrant(
+            root, environment, "snapshot", "list", capture=True
+        )
+        return snapshot in {line.strip() for line in snapshots.stdout.splitlines()}
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def prepare_runtime_snapshot(root, box_name, version, snapshot=SNAPSHOT_NAME):
+    """Импортирует box один раз и фиксирует выключенное чистое состояние VM.
+
+    Host-репозиторий в эту VM не монтируется. В snapshot ещё нет сценария, флага,
+    контейнеров запуска или модельных credentials — только подготовленный образ и
+    неизменяемые runtime-файлы внутри гостевого диска.
+    """
+    environment = _runtime_environment(root, box_name, version)
+    _runtime_vagrant(root, environment, "destroy", "-f")
+    _runtime_vagrant(root, environment, "up", "--provider=virtualbox", "--no-provision")
+    _runtime_vagrant(
+        root,
+        environment,
+        "ssh",
+        "-c",
+        "test -d /opt/agentic-lab/vm/escape && sudo docker info >/dev/null",
+    )
+    _runtime_vagrant(root, environment, "halt", "-f")
+    _runtime_vagrant(root, environment, "snapshot", "save", "-f", snapshot)
+
+
 def init_benchmark(
     root,
     base_box=DEFAULT_BOX,
@@ -217,19 +327,29 @@ def init_benchmark(
 
     with FileLock(locks_directory / "benchmark-init.lock", timeout=PREPARATION_TIMEOUT):
         previous = _read_previous_state(state_path)
-        if not force and _can_reuse_box(previous, fingerprint, name, output):
-            print(f"Benchmark already initialized: {previous['box']}", flush=True)
+        reuse_box = not force and _can_reuse_box(previous, fingerprint, name, output)
+        if reuse_box:
+            box_name = previous["box"]
+            box_file = Path(previous["box_file"])
+        else:
+            # Уникальное имя сохраняет прошлую регистрацию, пока новая не готова.
+            stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S-%f")
+            box_name = name or f"agentic-lab/escape-{stamp}"
+            box_file = output or root / ".cache/escape-boxes" / f"escape-{stamp}.box"
+            box_file = box_file.resolve()
+            build_box(base_box, box_name, box_file, version, root=root)
+
+        snapshot = SNAPSHOT_NAME
+        if reuse_box and _snapshot_available(
+            root, box_name, version, previous.get("snapshot", "")
+        ):
+            print(f"Benchmark already initialized: {box_name}", flush=True)
             return previous
 
-        # Уникальное имя сохраняет прошлую регистрацию, пока новая не готова.
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
-        box_name = name or f"agentic-lab/escape-{stamp}"
-        box_file = output or root / ".cache/escape-boxes" / f"escape-{stamp}.box"
-        box_file = box_file.resolve()
-        build_box(base_box, box_name, box_file, version, root=root)
-
+        prepare_runtime_snapshot(root, box_name, version, snapshot)
         state = {
             "box": box_name,
+            "snapshot": snapshot,
             "fingerprint": fingerprint,
             "openclaw_version": version,
             "base_box": base_box,
