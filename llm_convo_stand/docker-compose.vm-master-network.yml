@@ -1,0 +1,12 @@
+services:
+  ui:
+    networks:
+      default: {}
+      escape-bench:
+        aliases:
+          - vm-master
+
+networks:
+  escape-bench:
+    external: true
+    name: ${ESCAPE_BENCH_NETWORK:-escape-bench}

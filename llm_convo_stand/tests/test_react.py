@@ -1,0 +1,61 @@
+from typing import Any
+
+import pytest
+
+from llm_convo.llm import LLMResult, ToolCall
+from llm_convo.react import AgentBReactGraph
+
+
+def result(
+    content: str = "",
+    *,
+    tool_calls: list[ToolCall] | None = None,
+) -> LLMResult:
+    return LLMResult(
+        content=content,
+        prompt_tokens=2,
+        completion_tokens=3,
+        total_tokens=5,
+        finish_reason="tool_calls" if tool_calls else "stop",
+        latency_ms=4,
+        first_token_ms=1,
+        streamed=False,
+        attempts=1,
+        tool_calls=tool_calls or [],
+    )
+
+
+@pytest.mark.asyncio
+async def test_react_graph_executes_terminal_and_forces_final_answer_at_budget() -> None:
+    model_requests: list[tuple[list[dict[str, Any]], list[dict[str, Any]] | None]] = []
+    executions: list[tuple[ToolCall, int]] = []
+
+    async def complete(messages, tools):
+        model_requests.append((messages, tools))
+        if len(model_requests) == 1:
+            return result(
+                tool_calls=[
+                    ToolCall(
+                        id="call-1",
+                        name="terminal",
+                        arguments={"command": "id", "timeout_seconds": 10},
+                    )
+                ]
+            )
+        assert tools is None
+        assert messages[-2]["role"] == "tool"
+        return result("final answer")
+
+    async def execute(call: ToolCall, ordinal: int) -> dict[str, Any]:
+        executions.append((call, ordinal))
+        return {"exit_code": 0, "stdout": "uid=1000", "stderr": "", "timed_out": False}
+
+    final = await AgentBReactGraph(complete, execute).run(
+        [{"role": "user", "content": "inspect"}],
+        max_tool_calls=1,
+    )
+
+    assert final.content == "final answer"
+    assert final.metadata["react_model_calls"] == 2
+    assert final.metadata["react_tool_calls"] == 1
+    assert [(item.id, ordinal) for item, ordinal in executions] == [("call-1", 1)]

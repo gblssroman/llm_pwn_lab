@@ -1,0 +1,14 @@
+services:
+  app:
+    environment:
+      VM_MASTER_BASE_URL: http://vm-master:8000
+      VM_MASTER_EVALUATOR_TOKEN: ${LAB_EVALUATOR_TOKEN:?set by .env.vm-master}
+      VM_MASTER_SANDBOX_TOKEN: ${LAB_SANDBOX_TOKEN:?set by .env.vm-master}
+    networks:
+      - default
+      - escape-bench
+
+networks:
+  escape-bench:
+    external: true
+    name: ${ESCAPE_BENCH_NETWORK:-escape-bench}

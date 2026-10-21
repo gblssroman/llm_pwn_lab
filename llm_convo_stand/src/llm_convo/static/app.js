@@ -1,0 +1,878 @@
+const $ = (selector) => document.querySelector(selector);
+const $$ = (selector) => [...document.querySelectorAll(selector)];
+
+const state = {
+  conversations: [],
+  selectedId: null,
+  conversation: null,
+  messages: [],
+  events: [],
+  snapshots: [],
+  langfuse: null,
+  benchmark: null,
+  scenarios: [],
+  vmMaster: null,
+  eventSource: null,
+  liveDraft: null,
+  followLiveOutput: true,
+  activeTab: "details",
+};
+
+const terminalStatuses = new Set(["stopped", "timed_out", "completed", "failed"]);
+let conversationRefreshTimer = null;
+let langfuseRefreshTimer = null;
+let programmaticMessageScroll = false;
+
+async function api(path, options = {}) {
+  const response = await fetch(path, {
+    ...options,
+    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+  });
+  if (!response.ok) {
+    let detail = `${response.status} ${response.statusText}`;
+    try {
+      const body = await response.json();
+      detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail || body);
+    } catch (_) { /* response was not JSON */ }
+    throw new Error(detail);
+  }
+  return response.json();
+}
+
+function shortId(id) { return id ? id.slice(0, 8) : "—"; }
+function compact(text, max = 74) { return text.length > max ? `${text.slice(0, max)}…` : text; }
+function fmtDate(value) {
+  if (!value) return "—";
+  return new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
+}
+function fmtDuration(ms) {
+  if (ms == null) return "—";
+  return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`;
+}
+function fmtNumber(value) { return value == null ? "—" : new Intl.NumberFormat("ru-RU").format(value); }
+function statusLabel(status) { return String(status || "unknown").replaceAll("_", " "); }
+
+function node(tag, className, text) {
+  const element = document.createElement(tag);
+  if (className) element.className = className;
+  if (text != null) element.textContent = text;
+  return element;
+}
+
+function showToast(message) {
+  const toast = $("#toast");
+  toast.textContent = message;
+  toast.classList.add("show");
+  clearTimeout(showToast.timer);
+  showToast.timer = setTimeout(() => toast.classList.remove("show"), 2600);
+}
+
+async function checkHealth() {
+  const [backend, vm] = await Promise.allSettled([
+    api("/health/ready"),
+    api("/v1/vm-master/health"),
+  ]);
+  if (backend.status === "fulfilled") {
+    $("#database-status").className = "status-square " + backend.value.database;
+    $("#langfuse-status").className = "status-square " + backend.value.langfuse;
+  } else {
+    $("#database-status").className = "status-square unknown";
+    $("#langfuse-status").className = "status-square unknown";
+  }
+  if (vm.status === "fulfilled") {
+    state.vmMaster = vm.value;
+    $("#vm-master-status").className = "status-square " + vm.value.status;
+  } else {
+    state.vmMaster = null;
+    $("#vm-master-status").className = "status-square unknown";
+  }
+}
+
+function selectedScenario() {
+  return state.scenarios.find((item) => item.id === $("#scenario-id").value) || null;
+}
+
+function renderScenarioPreview() {
+  const preview = $("#scenario-preview");
+  const scenario = selectedScenario();
+  if (!scenario) {
+    preview.textContent = state.scenarios.length
+      ? "Select a scenario."
+      : "VM master is unavailable or not configured.";
+    return;
+  }
+  preview.replaceChildren(
+    node("strong", "", scenario.title + " · " + scenario.mode),
+    node("div", "message-meta", scenario.category),
+    node("p", "", scenario.prompt),
+  );
+}
+
+async function loadScenarios() {
+  const select = $("#scenario-id");
+  try {
+    state.scenarios = await api("/v1/benchmark-scenarios");
+    select.replaceChildren(...state.scenarios.map((scenario) => {
+      const option = node("option", "", "[" + scenario.mode + "] " + scenario.title);
+      option.value = scenario.id;
+      return option;
+    }));
+    select.disabled = false;
+  } catch (error) {
+    state.scenarios = [];
+    select.replaceChildren();
+    select.disabled = true;
+    $("#scenario-preview").textContent = "Cannot load scenarios: " + error.message;
+  }
+  renderScenarioPreview();
+}
+
+function toggleRunType() {
+  const benchmark = $("#run-type").value === "benchmark";
+  $("#benchmark-settings").classList.toggle("hidden", !benchmark);
+  $("#normal-task-field").classList.toggle("hidden", benchmark);
+  $("#normal-task-field textarea").disabled = benchmark;
+  $("#scenario-id").disabled = !benchmark || !state.scenarios.length;
+  $("#start-title").textContent = benchmark
+    ? "Start VM benchmark"
+    : "Start agent conversation";
+  $("#submit-conversation").textContent = benchmark
+    ? "Start benchmark"
+    : "Start conversation";
+  const timeout = $('#start-form [name="timeout_seconds"]');
+  if (benchmark && timeout.value === "1800") timeout.value = "3600";
+  if (!benchmark && timeout.value === "3600") timeout.value = "1800";
+}
+
+async function loadConversations({ selectFirst = false } = {}) {
+  const filter = $("#status-filter").value;
+  const query = new URLSearchParams({ limit: "200" });
+  if (filter) query.set("status", filter);
+  const page = await api(`/v1/conversations?${query}`);
+  state.conversations = page.items;
+  renderConversationList();
+  if (selectFirst && !state.selectedId && page.items.length) selectConversation(page.items[0].id);
+}
+
+function scheduleConversationRefresh() {
+  if (conversationRefreshTimer) return;
+  conversationRefreshTimer = setTimeout(() => {
+    conversationRefreshTimer = null;
+    loadConversations().catch(() => {});
+  }, 1000);
+}
+
+function scheduleLangfuseRefresh() {
+  if (langfuseRefreshTimer) return;
+  langfuseRefreshTimer = setTimeout(() => {
+    langfuseRefreshTimer = null;
+    if (state.selectedId) loadLangfuse(state.selectedId);
+  }, 1500);
+}
+
+function renderConversationList() {
+  const list = $("#conversation-list");
+  const search = $("#conversation-search").value.trim().toLowerCase();
+  const items = state.conversations.filter((item) => !search || item.task_prompt.toLowerCase().includes(search) || item.id.includes(search));
+  list.replaceChildren();
+  if (!items.length) {
+    list.append(node("div", "empty-list", "No conversations found."));
+    return;
+  }
+  for (const item of items) {
+    const card = node("article", `conversation-card${item.id === state.selectedId ? " active" : ""}`);
+    card.dataset.id = item.id;
+    const top = node("div", "conversation-card-top");
+    top.append(node("span", `status-pill ${item.status}`, statusLabel(item.status)), node("span", "message-meta", `${item.turn_count} turns`));
+    card.append(top, node("div", "conversation-card-title", item.task_prompt));
+    const meta = node("div", "conversation-card-meta");
+    meta.append(node("span", "", shortId(item.id)), node("span", "", fmtDate(item.updated_at)));
+    card.append(meta);
+    card.addEventListener("click", () => selectConversation(item.id));
+    list.append(card);
+  }
+}
+
+async function fetchAllMessages(id) {
+  const messages = [];
+  let after = 0;
+  while (true) {
+    const page = await api(`/v1/conversations/${id}/messages?after_sequence=${after}&limit=1000`);
+    messages.push(...page.items);
+    if (!page.next_after_sequence) return messages;
+    after = page.next_after_sequence;
+  }
+}
+
+async function fetchBenchmark(id) {
+  try {
+    return await api("/v1/benchmark-runs/" + id);
+  } catch (error) {
+    if (error.message.startsWith("404 ")) return null;
+    throw error;
+  }
+}
+
+async function selectConversation(id) {
+  if (state.selectedId === id && state.conversation) return;
+  closeEventSource();
+  state.selectedId = id;
+  state.liveDraft = null;
+  renderConversationList();
+  setStreamState("connecting", "connecting");
+  try {
+    const [conversation, messages, events, snapshots, benchmark] = await Promise.all([
+      api(`/v1/conversations/${id}`),
+      fetchAllMessages(id),
+      api(`/v1/conversations/${id}/events?limit=5000`),
+      api(`/v1/conversations/${id}/context-snapshots`),
+      fetchBenchmark(id),
+    ]);
+    if (state.selectedId !== id) return;
+    state.conversation = conversation;
+    state.messages = messages;
+    state.events = events;
+    state.snapshots = snapshots;
+    state.benchmark = benchmark;
+    state.langfuse = null;
+    renderAll();
+    connectEventSource(id);
+    loadLangfuse(id);
+  } catch (error) {
+    showToast(`Cannot load conversation: ${error.message}`);
+    setStreamState("offline", "error");
+  }
+}
+
+function renderAll() {
+  $("#empty-state").classList.add("hidden");
+  $("#conversation-view").classList.remove("hidden");
+  renderHeader();
+  renderActivity();
+  renderStats();
+  renderMessages();
+  renderInspector();
+  renderConversationList();
+}
+
+function renderHeader() {
+  const convo = state.conversation;
+  if (!convo) return;
+  const benchmark = state.benchmark;
+  $("#conversation-title").textContent = compact(convo.task_prompt, 92);
+  $("#conversation-meta").textContent = benchmark
+    ? shortId(convo.id) + " · " + benchmark.scenario_id + " · " + statusLabel(benchmark.stage)
+    : shortId(convo.id) + " · " + statusLabel(convo.status) + " · next " + convo.next_speaker;
+  $("#task-prompt").textContent = convo.task_prompt;
+  const isTerminal = terminalStatuses.has(convo.status);
+  $("#stop-conversation").classList.toggle("hidden", Boolean(benchmark) || isTerminal);
+  $("#finish-benchmark").classList.toggle(
+    "hidden",
+    !benchmark || benchmark.stage !== "conversation",
+  );
+  $("#abort-benchmark").classList.toggle(
+    "hidden",
+    !benchmark || !["queued", "provisioning", "conversation"].includes(benchmark.stage),
+  );
+  const link = $("#langfuse-link");
+  link.classList.toggle("hidden", !convo.langfuse_url);
+  if (convo.langfuse_url) link.href = convo.langfuse_url;
+}
+
+function renderStats() {
+  const totalTokens = state.messages.reduce((sum, item) => sum + (item.prompt_tokens || 0) + (item.completion_tokens || 0), 0);
+  const avgLatency = state.messages.length ? Math.round(state.messages.reduce((sum, item) => sum + item.latency_ms, 0) / state.messages.length) : null;
+  const streamed = state.messages.filter((item) => item.streamed).length;
+  const stats = [
+    ["Turns", state.messages.length],
+    ["Total tokens", fmtNumber(totalTokens)],
+    ["Avg latency", fmtDuration(avgLatency)],
+    ["Streamed", `${streamed}/${state.messages.length}`],
+  ];
+  const row = $("#stats-row"); row.replaceChildren();
+  for (const [label, value] of stats) {
+    const card = node("div", "stat"); card.append(node("span", "", label), node("strong", "", String(value))); row.append(card);
+  }
+}
+
+function cleanActivityText(value) {
+  return String(value || "")
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replaceAll("\r", "")
+    .trim();
+}
+
+function latestVmLog(action) {
+  return [...state.events].reverse().find(
+    (event) => event.event_type === "vm_job_log" && event.payload?.action === action,
+  );
+}
+
+function activeToolCall() {
+  const event = [...state.events].reverse().find(
+    (item) => ["tool_started", "tool_completed"].includes(item.event_type),
+  );
+  return event?.event_type === "tool_started" ? event.payload : null;
+}
+
+function currentActivity() {
+  const convo = state.conversation;
+  const run = state.benchmark;
+  if (!convo) return { tone: "idle", title: "No conversation selected", detail: "" };
+
+  const tool = activeToolCall();
+  if (tool) {
+    const command = cleanActivityText(tool.arguments?.command);
+    return { tone: "active", title: `Running ${tool.name}`, detail: command || `Tool call ${tool.ordinal}` };
+  }
+
+  if (state.liveDraft) {
+    const agent = state.liveDraft.speaker === "agent_a" ? "Agent A" : "Agent B";
+    return { tone: "active", title: `${agent} is generating`, detail: state.liveDraft.model || "Waiting for model output" };
+  }
+
+  if (run) {
+    if (run.stage === "queued") {
+      return { tone: "active", title: "Waiting for VM", detail: "Queued for exclusive VM access" };
+    }
+    if (run.stage === "provisioning") {
+      const detail = cleanActivityText(latestVmLog("up")?.payload?.text);
+      return { tone: "active", title: "Preparing VM", detail: detail || "Starting Vagrant and provisioning the scenario" };
+    }
+    if (run.stage === "conversation") {
+      return { tone: "active", title: "Conversation active", detail: `Waiting for ${convo.next_speaker === "agent_a" ? "Agent A" : "Agent B"} · turn ${convo.turn_count + 1}` };
+    }
+    if (run.stage === "evaluating") {
+      return { tone: "active", title: "Evaluating benchmark", detail: "Running scenario checks" };
+    }
+    if (run.stage === "cleaning_up") {
+      const detail = cleanActivityText(latestVmLog("down")?.payload?.text);
+      return { tone: "active", title: "Cleaning up VM", detail: detail || "Waiting for Vagrant to destroy the VM" };
+    }
+    if (["failed", "cleanup_failed"].includes(run.stage)) {
+      return { tone: "error", title: "Benchmark failed", detail: run.error || run.cleanup_error || "See benchmark details" };
+    }
+    if (run.stage === "aborted") {
+      return { tone: "idle", title: "Benchmark aborted", detail: "VM cleanup completed" };
+    }
+    if (run.stage === "completed") {
+      return { tone: "done", title: "Benchmark completed", detail: run.verdict ? `Passed: ${run.verdict.passed === true ? "yes" : "no"}` : "Run finished" };
+    }
+  }
+
+  if (convo.status === "running") {
+    return { tone: "active", title: "Conversation active", detail: `Waiting for ${convo.next_speaker === "agent_a" ? "Agent A" : "Agent B"} · turn ${convo.turn_count + 1}` };
+  }
+  if (convo.status === "failed") return { tone: "error", title: "Conversation failed", detail: convo.error || "See run details" };
+  if (convo.status === "completed") return { tone: "done", title: "Conversation completed", detail: `${convo.turn_count} turns` };
+  return { tone: "idle", title: statusLabel(convo.status), detail: "" };
+}
+
+function renderActivity() {
+  const activity = currentActivity();
+  const row = $("#activity-row");
+  row.className = `activity-row ${activity.tone}`;
+  const copy = node("div", "activity-copy");
+  copy.append(node("span", "", "Current activity"), node("strong", "", activity.title));
+  if (activity.detail) copy.append(node("small", "", activity.detail));
+  row.replaceChildren(node("i", "activity-dot"), copy);
+}
+
+function messageElement(message, live = false) {
+  const article = node("article", `message ${message.speaker}${live ? " live" : ""}`);
+  article.dataset.sequence = message.sequence;
+  article.append(node("div", "avatar", message.speaker === "agent_a" ? "A" : "B"));
+  const body = node("div", "message-body");
+  const head = node("div", "message-head");
+  head.append(node("span", "message-name", message.speaker === "agent_a" ? "Agent A" : "Agent B"), node("span", "message-meta", `#${message.sequence} · ${message.model || "generating"}`));
+  const content = node("div", "message-content");
+  if (live || !globalThis.AgentRelayMarkdown) {
+    content.textContent = message.content || "";
+  } else {
+    content.innerHTML = globalThis.AgentRelayMarkdown.render(message.content || "");
+  }
+  body.append(head, content);
+  if (!live) {
+    const metrics = node("div", "message-metrics");
+    metrics.append(
+      node("span", "", fmtDuration(message.latency_ms)),
+      node("span", "", `TTFT ${fmtDuration(message.first_token_ms)}`),
+      node("span", "", `${fmtNumber(message.prompt_tokens)} in`),
+      node("span", "", `${fmtNumber(message.completion_tokens)} out`),
+      node("span", "", message.streamed ? "stream" : "response"),
+      node("span", "", `${message.attempts} attempt${message.attempts === 1 ? "" : "s"}`),
+    );
+    body.append(metrics);
+  }
+  article.append(body);
+  return article;
+}
+
+function messageListIsAtBottom() {
+  const container = $("#message-stream");
+  return container.scrollHeight - container.scrollTop - container.clientHeight <= 2;
+}
+
+function scrollMessagesToBottom() {
+  const container = $("#message-stream");
+  state.followLiveOutput = true;
+  programmaticMessageScroll = true;
+  container.scrollTop = container.scrollHeight;
+  requestAnimationFrame(() => { programmaticMessageScroll = false; });
+}
+
+function renderTypingState() {
+  const banner = $("#typing-banner");
+  banner.classList.toggle("hidden", !state.liveDraft || Boolean(state.liveDraft.content));
+  if (state.liveDraft) $("#typing-label").textContent = `${state.liveDraft.speaker === "agent_a" ? "Agent A" : "Agent B"} is thinking`;
+}
+
+function renderMessages({ scrollToBottom = true } = {}) {
+  const container = $("#message-stream");
+  const shouldScroll = scrollToBottom || state.followLiveOutput;
+  container.replaceChildren(...state.messages.map((message) => messageElement(message)));
+  if (state.liveDraft) container.append(messageElement({ ...state.liveDraft, model: state.liveDraft.model || "generating" }, true));
+  renderTypingState();
+  if (shouldScroll) scrollMessagesToBottom();
+}
+
+function beginLiveMessage(data) {
+  if (data.sequence <= Math.max(0, ...state.messages.map((item) => item.sequence))) return false;
+  if (state.liveDraft?.sequence === data.sequence) return true;
+  const container = $("#message-stream");
+  const shouldScroll = state.followLiveOutput;
+  container.querySelector(".message.live")?.remove();
+  state.liveDraft = { sequence: data.sequence, speaker: data.speaker, model: data.model, content: "" };
+  container.append(messageElement({ ...state.liveDraft, model: state.liveDraft.model || "generating" }, true));
+  renderActivity();
+  renderTypingState();
+  if (shouldScroll) scrollMessagesToBottom();
+  return true;
+}
+
+function updateLiveMessage(data, { reset = false } = {}) {
+  if (!state.liveDraft || state.liveDraft.sequence !== data.sequence) {
+    if (!beginLiveMessage(data)) return;
+  }
+  const shouldScroll = state.followLiveOutput;
+  state.liveDraft.content = reset ? "" : state.liveDraft.content + (data.content || "");
+  const live = $("#message-stream .message.live");
+  if (live) live.querySelector(".message-content").textContent = state.liveDraft.content;
+  renderTypingState();
+  if (shouldScroll) scrollMessagesToBottom();
+}
+
+function removeLiveMessage() {
+  state.liveDraft = null;
+  $("#message-stream .message.live")?.remove();
+  renderActivity();
+  renderTypingState();
+}
+
+function renderInspector() {
+  renderDetails(); renderContext(); renderEvents(); renderBenchmark(); renderLangfuse();
+}
+
+function addKv(parent, key, value) {
+  const row = node("div", "kv"); row.append(node("span", "", key), node("strong", "", value == null ? "—" : String(value))); parent.append(row);
+}
+
+function renderDetails() {
+  const panel = $("#tab-details"); panel.replaceChildren();
+  const convo = state.conversation; if (!convo) return;
+  const status = node("div", "inspect-section"); status.append(node("h3", "", "Run"));
+  addKv(status, "Status", statusLabel(convo.status)); addKv(status, "ID", convo.id); addKv(status, "Created", fmtDate(convo.created_at)); addKv(status, "Deadline", fmtDate(convo.deadline_at)); addKv(status, "Turns", convo.turn_count); addKv(status, "Context", fmtNumber(convo.context_size)); addKv(status, "Compression", `${Math.round(convo.compression_threshold * 100)}%`);
+  panel.append(status);
+  for (const [key, label] of [["agent_a", "Agent A"], ["agent_b", "Agent B"]]) {
+    const config = convo.config[key]; const section = node("div", "inspect-section"); section.append(node("h3", "", label));
+    addKv(section, "Model", config.model); addKv(section, "Endpoint", config.base_url); addKv(section, "Streaming", config.stream); addKv(section, "Max tokens", config.parameters.max_tokens); addKv(section, "Temperature", config.parameters.temperature); addKv(section, "Context", fmtNumber(config.context_size || convo.context_size)); addKv(section, "Compression", `${Math.round((config.compression_threshold || convo.compression_threshold) * 100)}%`); addKv(section, "Recent", config.retain_recent_messages || convo.retain_recent_messages);
+    const prompt = node("div", "prompt-block"); prompt.append(node("b", "", "System prompt"), node("p", "", config.system_prompt)); section.append(prompt); panel.append(section);
+  }
+  if (convo.error) { const error = node("div", "inline-error", convo.error); panel.prepend(error); }
+}
+
+function renderContext() {
+  const panel = $("#tab-context"); panel.replaceChildren();
+  if (!state.snapshots.length) { panel.append(node("div", "placeholder-copy", "The context has not been compressed yet.")); return; }
+  for (const snapshot of [...state.snapshots].reverse()) {
+    const block = node("div", "summary-block");
+    block.append(node("b", "", `Summary v${snapshot.version} · through #${snapshot.through_sequence}`), node("p", "", snapshot.summary));
+    const meta = node("div", "message-metrics"); meta.append(node("span", "", `source #${snapshot.source_from_sequence}–${snapshot.source_to_sequence}`), node("span", "", `${fmtNumber(snapshot.estimated_input_tokens)} → ${fmtNumber(snapshot.estimated_output_tokens)} est. tokens`), node("span", "", fmtDate(snapshot.created_at))); block.append(meta); panel.append(block);
+  }
+}
+
+function renderEvents() {
+  const panel = $("#tab-events"); panel.replaceChildren();
+  if (!state.events.length) { panel.append(node("div", "placeholder-copy", "No durable events yet.")); return; }
+  for (const event of [...state.events].reverse()) {
+    const card = node("div", "event-card"); const header = node("header"); header.append(node("strong", "", event.event_type), node("time", "", fmtDate(event.created_at))); card.append(header, node("pre", "", JSON.stringify(event.payload, null, 2))); panel.append(card);
+  }
+}
+
+function renderBenchmark() {
+  const panel = $("#tab-benchmark");
+  panel.replaceChildren();
+  const run = state.benchmark;
+  if (!run) {
+    panel.append(node("div", "placeholder-copy", "This is a free conversation, not a VM benchmark."));
+    return;
+  }
+
+  const summary = node("div", "inspect-section");
+  summary.append(node("h3", "", "VM benchmark"));
+  addKv(summary, "Scenario", run.scenario_id);
+  addKv(summary, "Mode", run.scenario_mode);
+  addKv(summary, "Stage", statusLabel(run.stage));
+  addKv(summary, "Rounds", Math.floor(state.messages.length / 2) + " / " + run.max_rounds);
+  addKv(summary, "B tools", run.max_tool_calls_per_b_turn + " per turn");
+  addKv(summary, "Reason", run.completion_reason);
+  panel.append(summary);
+
+  if (run.scenario?.metadata?.attack_success) {
+    const meaning = node("div", "prompt-block");
+    meaning.append(
+      node("b", "", "Verdict meaning"),
+      node("p", "", run.scenario.metadata.attack_success),
+    );
+    panel.append(meaning);
+  }
+
+  if (run.verdict) {
+    const passed = run.verdict.passed === true;
+    const verdict = node(
+      "div",
+      "benchmark-verdict " + (passed ? "passed" : "failed"),
+    );
+    verdict.append(
+      node("strong", "", passed ? "Verifier: passed" : "Verifier: not passed"),
+      node("pre", "", JSON.stringify(run.verdict, null, 2)),
+    );
+    panel.append(verdict);
+  } else {
+    panel.append(node("div", "placeholder-copy", "Verifier result is not available yet."));
+  }
+
+  if (run.submit_result) {
+    const submitted = node("div", "benchmark-verdict");
+    submitted.append(
+      node("strong", "", "Escape flag submission"),
+      node("pre", "", JSON.stringify(run.submit_result, null, 2)),
+    );
+    panel.append(submitted);
+  }
+  if (run.error) panel.append(node("div", "inline-error", run.error));
+  if (run.cleanup_error) {
+    panel.append(node("div", "inline-error", "Cleanup: " + run.cleanup_error));
+  }
+
+  const tools = node("div", "inspect-section");
+  tools.append(node("h3", "", "Agent B tool calls"));
+  if (!run.tool_executions.length) {
+    tools.append(node("div", "placeholder-copy", "No terminal calls yet."));
+  }
+  for (const execution of [...run.tool_executions].reverse()) {
+    const card = node("div", "tool-card");
+    const header = node("header");
+    header.append(
+      node("strong", "", "#" + execution.message_sequence + "." + execution.ordinal + " " + execution.name),
+      node("span", "status-pill " + execution.status, statusLabel(execution.status)),
+    );
+    card.append(
+      header,
+      node("pre", "", JSON.stringify({
+        arguments: execution.arguments,
+        result: execution.result,
+        error: execution.error,
+      }, null, 2)),
+    );
+    tools.append(card);
+  }
+  panel.append(tools);
+}
+
+function renderLangfuse() {
+  const panel = $("#tab-langfuse"); panel.replaceChildren();
+  if (!state.conversation) return;
+  if (!state.langfuse) { panel.append(node("div", "placeholder-copy", "Loading observations from Langfuse…")); return; }
+  if (state.langfuse.url) { const section = node("div", "inspect-section"); const link = node("a", "inline-link", `Open trace ${shortId(state.langfuse.trace_id)} ↗`); link.href = state.langfuse.url; link.target = "_blank"; link.rel = "noreferrer"; section.append(link); panel.append(section); }
+  if (state.langfuse.error) panel.append(node("div", "inline-error", `Langfuse: ${state.langfuse.error}`));
+  if (!state.langfuse.observations.length) { panel.append(node("div", "placeholder-copy", "No observations are queryable yet. Active traces can take a moment to flush.")); return; }
+  for (const observation of state.langfuse.observations) {
+    const type = String(observation.type || observation.observation_type || "span").toLowerCase();
+    const card = node("div", `observation-card ${type}`); const header = node("header"); header.append(node("strong", "", observation.name || type), node("time", "", type)); card.append(header);
+    const summary = { model: observation.model, startTime: observation.startTime || observation.start_time, endTime: observation.endTime || observation.end_time, usage: observation.usageDetails || observation.usage_details, level: observation.level, status: observation.statusMessage || observation.status_message };
+    card.append(node("pre", "", JSON.stringify(summary, null, 2))); panel.append(card);
+  }
+}
+
+async function loadLangfuse(id) {
+  try { state.langfuse = await api(`/v1/conversations/${id}/langfuse?limit=200`); }
+  catch (error) { state.langfuse = { enabled: false, observations: [], error: error.message }; }
+  if (state.selectedId === id) renderLangfuse();
+}
+async function loadBenchmark(id, { refreshConversation = false } = {}) {
+  const requests = [fetchBenchmark(id)];
+  if (refreshConversation) requests.push(api("/v1/conversations/" + id));
+  const results = await Promise.all(requests);
+  if (state.selectedId !== id) return;
+  state.benchmark = results[0];
+  if (results[1]) state.conversation = results[1];
+  renderHeader();
+  renderActivity();
+  renderBenchmark();
+}
+
+
+function upsertMessage(message) {
+  const index = state.messages.findIndex((item) => item.sequence === message.sequence);
+  if (index >= 0) state.messages[index] = message; else state.messages.push(message);
+  state.messages.sort((a, b) => a.sequence - b.sequence);
+}
+
+function setStreamState(mode, label) {
+  const element = $("#stream-state"); element.className = `stream-state ${mode}`; element.lastChild.textContent = ` ${label}`;
+}
+
+function closeEventSource() {
+  if (state.eventSource) state.eventSource.close(); state.eventSource = null;
+}
+
+function connectEventSource(id) {
+  closeEventSource();
+  const source = new EventSource(`/v1/conversations/${id}/stream`); state.eventSource = source;
+  source.onopen = () => setStreamState("live", "live");
+  source.onerror = () => setStreamState("connecting", "reconnecting");
+
+  source.addEventListener("ready", async (event) => {
+    const data = JSON.parse(event.data); if (state.selectedId !== id) return;
+    state.conversation = data.conversation; renderHeader(); renderActivity();
+    const currentLastSequence = Math.max(0, ...state.messages.map((item) => item.sequence));
+    if (data.last_sequence > currentLastSequence) {
+      try { state.messages = await fetchAllMessages(id); renderStats(); renderMessages(); } catch (_) { /* next reconciliation will recover */ }
+    }
+  });
+
+  source.addEventListener("turn_started", (event) => beginLiveMessage(JSON.parse(event.data)));
+  source.addEventListener("turn_stream_started", (event) => {
+    updateLiveMessage(JSON.parse(event.data), { reset: true });
+  });
+  source.addEventListener("turn_delta", (event) => {
+    updateLiveMessage(JSON.parse(event.data));
+  });
+  source.addEventListener("turn_completed", async (event) => {
+    const data = JSON.parse(event.data);
+    const container = $("#message-stream");
+    const shouldScroll = state.followLiveOutput;
+    if (data.message) {
+      upsertMessage(data.message);
+      const existing = container.querySelector(`[data-sequence="${data.message.sequence}"]`);
+      const completed = messageElement(data.message);
+      if (existing) existing.replaceWith(completed); else container.append(completed);
+    } else {
+      const previousScrollTop = container.scrollTop;
+      try { state.messages = await fetchAllMessages(id); renderMessages({ scrollToBottom: shouldScroll }); } catch (_) {}
+      if (!shouldScroll) container.scrollTop = previousScrollTop;
+    }
+    state.liveDraft = null;
+    container.querySelector(".message.live")?.remove();
+    renderTypingState();
+    if (state.conversation) { state.conversation.turn_count = state.messages.length; state.conversation.next_speaker = data.next_speaker || state.conversation.next_speaker; }
+    renderHeader(); renderActivity(); renderStats(); renderBenchmark(); if (shouldScroll) scrollMessagesToBottom(); scheduleConversationRefresh(); scheduleLangfuseRefresh();
+  });
+  source.addEventListener("context_compressed", async () => { try { state.snapshots = await api(`/v1/conversations/${id}/context-snapshots`); renderContext(); } catch (_) {} });
+
+  const benchmarkEvents = [
+    "benchmark_stage_changed",
+    "vm_job_log",
+    "vm_job_completed",
+    "tool_started",
+    "tool_completed",
+    "benchmark_flag_submitted",
+    "benchmark_verified",
+    "benchmark_evaluation_failed",
+    "benchmark_cleanup_failed",
+  ];
+  for (const eventName of benchmarkEvents) {
+    source.addEventListener(eventName, async () => {
+      if (state.selectedId !== id) return;
+      try {
+        await loadBenchmark(id, { refreshConversation: true });
+        state.events = await api("/v1/conversations/" + id + "/events?limit=5000");
+        renderActivity();
+        renderEvents();
+      } catch (_) { /* next reconciliation will recover */ }
+    });
+  }
+
+  const statusEvents = ["conversation_queued", "conversation_started", "conversation_stopped", "conversation_timed_out", "conversation_completed", "conversation_failed", "conversation_status"];
+  for (const eventName of statusEvents) source.addEventListener(eventName, async (event) => {
+    const data = JSON.parse(event.data); if (state.conversation && data.status) state.conversation.status = data.status;
+    if (eventName === "conversation_started" && state.conversation) state.conversation.status = "running";
+    if (eventName.startsWith("conversation_") && !["conversation_started", "conversation_queued", "conversation_status"].includes(eventName) && state.conversation) state.conversation.status = eventName.replace("conversation_", "");
+    if (data.error && state.conversation) state.conversation.error = data.error;
+    renderHeader(); renderActivity(); renderDetails(); scheduleConversationRefresh();
+    if (state.benchmark) await loadBenchmark(id).catch(() => {});
+    if (state.conversation && terminalStatuses.has(state.conversation.status)) { source.close(); setStreamState("offline", state.conversation.status); removeLiveMessage(); scheduleLangfuseRefresh(); }
+  });
+}
+
+async function stopConversation() {
+  if (!state.selectedId) return;
+  const button = $("#stop-conversation"); button.disabled = true;
+  try { const result = await api(`/v1/conversations/${state.selectedId}/end`, { method: "POST", body: "{}" }); if (state.conversation) state.conversation.status = result.status; renderHeader(); renderActivity(); showToast("Conversation stopped"); }
+  catch (error) { showToast(`Stop failed: ${error.message}`); }
+  finally { button.disabled = false; }
+}
+async function runBenchmarkAction(action) {
+  if (!state.selectedId || !state.benchmark) return;
+  const finish = $("#finish-benchmark");
+  const abort = $("#abort-benchmark");
+  finish.disabled = true;
+  abort.disabled = true;
+  try {
+    state.benchmark = await api(
+      "/v1/benchmark-runs/" + state.selectedId + "/" + action,
+      { method: "POST", body: "{}" },
+    );
+    state.conversation = await api("/v1/conversations/" + state.selectedId);
+    renderHeader();
+    renderActivity();
+    renderBenchmark();
+    showToast(action === "finish" ? "Evaluation started" : "Benchmark aborted");
+  } catch (error) {
+    showToast(statusLabel(action) + " failed: " + error.message);
+  } finally {
+    finish.disabled = false;
+    abort.disabled = false;
+  }
+}
+
+
+async function openDialog() {
+  $("#form-error").classList.add("hidden");
+  $("#start-dialog").showModal();
+  toggleRunType();
+  if (!state.scenarios.length) await loadScenarios();
+  toggleRunType();
+}
+function closeDialog() { $("#start-dialog").close(); }
+
+function newIdempotencyKey() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  const random = globalThis.crypto?.getRandomValues
+    ? globalThis.crypto.getRandomValues(new Uint32Array(2)).join("-")
+    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return `web-${random}`;
+}
+
+async function startConversation(event) {
+  event.preventDefault(); const form = event.currentTarget; const values = Object.fromEntries(new FormData(form));
+  const submit = $("#submit-conversation"); const errorBox = $("#form-error"); submit.disabled = true; submit.textContent = "Starting…"; errorBox.classList.add("hidden");
+  const agent = (prefix) => ({
+    system_prompt: values[`${prefix}_system_prompt`],
+    model: values[`${prefix}_model`],
+    base_url: values[`${prefix}_base_url`],
+    api_key_env: null,
+    stream: values[`${prefix}_stream`],
+    request_timeout_seconds: Number(values[`${prefix}_request_timeout`]),
+    max_retries: Number(values[`${prefix}_max_retries`]),
+    context_size: Number(values[`${prefix}_context_size`]),
+    compression_threshold: Number(values[`${prefix}_compression_threshold`]),
+    retain_recent_messages: Number(values[`${prefix}_retain_recent_messages`]),
+    extra_body: values[`${prefix}_disable_thinking`] ? { chat_template_kwargs: { enable_thinking: false } } : {},
+    parameters: {
+      temperature: Number(values[`${prefix}_temperature`]),
+      max_tokens: Number(values[`${prefix}_max_tokens`]),
+      top_p: Number(values[`${prefix}_top_p`]),
+      frequency_penalty: Number(values[`${prefix}_frequency_penalty`]),
+      presence_penalty: Number(values[`${prefix}_presence_penalty`]),
+      seed: values[`${prefix}_seed`] === "" ? null : Number(values[`${prefix}_seed`]),
+    },
+  });
+  const agentA = agent("agent_a"); const agentB = agent("agent_b");
+  const benchmark = values.run_type === "benchmark";
+  const common = {
+    agent_a: agentA,
+    agent_b: agentB,
+    context_size: Math.min(agentA.context_size, agentB.context_size),
+    compression_threshold: Math.min(agentA.compression_threshold, agentB.compression_threshold),
+    retain_recent_messages: Math.min(agentA.retain_recent_messages, agentB.retain_recent_messages),
+    timeout_seconds: Number(values.timeout_seconds),
+  };
+  const body = benchmark
+    ? {
+        ...common,
+        scenario_id: values.scenario_id,
+        max_tool_calls_per_b_turn: Number(values.max_tool_calls_per_b_turn),
+        max_rounds: Number(values.max_rounds),
+      }
+    : { ...common, task_prompt: values.task_prompt };
+  try {
+    if (benchmark && !selectedScenario()) {
+      throw new Error("Select a vm_master scenario before starting.");
+    }
+    const endpoint = benchmark ? "/v1/benchmark-runs" : "/v1/conversations";
+    const created = await api(endpoint, {
+      method: "POST",
+      headers: { "Idempotency-Key": newIdempotencyKey() },
+      body: JSON.stringify(body),
+    });
+    closeDialog();
+    await loadConversations();
+    await selectConversation(created.conversation_id);
+    showToast(benchmark ? "Benchmark started" : "Conversation started");
+  } catch (error) {
+    errorBox.textContent = error.message;
+    errorBox.classList.remove("hidden");
+  } finally {
+    submit.disabled = false;
+    toggleRunType();
+  }
+}
+
+function initTabs() {
+  for (const button of $$(".inspector-tabs button")) button.addEventListener("click", () => {
+    state.activeTab = button.dataset.tab; $$(".inspector-tabs button").forEach((item) => item.classList.toggle("active", item === button)); $$(".tab-panel").forEach((panel) => panel.classList.toggle("active", panel.id === `tab-${state.activeTab}`));
+    if (state.activeTab === "langfuse" && state.selectedId) loadLangfuse(state.selectedId);
+  });
+}
+
+async function init() {
+  $("#new-conversation").addEventListener("click", openDialog);
+  $("#empty-new").addEventListener("click", openDialog);
+  $("#close-dialog").addEventListener("click", closeDialog);
+  $("#cancel-dialog").addEventListener("click", closeDialog);
+  $("#start-form").addEventListener("submit", startConversation);
+  $("#stop-conversation").addEventListener("click", stopConversation);
+  $("#finish-benchmark").addEventListener("click", () => runBenchmarkAction("finish"));
+  $("#abort-benchmark").addEventListener("click", () => runBenchmarkAction("abort"));
+  $("#run-type").addEventListener("change", toggleRunType);
+  $("#scenario-id").addEventListener("change", renderScenarioPreview);
+  $("#start-form").addEventListener("invalid", (event) => {
+    const details = event.target.closest("details"); if (details) details.open = true;
+    const errorBox = $("#form-error"); errorBox.textContent = "Check the highlighted field."; errorBox.classList.remove("hidden");
+  }, true);
+  const messageStream = $("#message-stream");
+  messageStream.addEventListener("wheel", (event) => {
+    if (event.deltaY < 0) state.followLiveOutput = false;
+  }, { passive: true });
+  messageStream.addEventListener("touchstart", () => { state.followLiveOutput = false; }, { passive: true });
+  messageStream.addEventListener("keydown", (event) => {
+    if (["ArrowUp", "PageUp", "Home"].includes(event.key)) state.followLiveOutput = false;
+  });
+  messageStream.addEventListener("scroll", () => {
+    if (!programmaticMessageScroll) state.followLiveOutput = messageListIsAtBottom();
+  }, { passive: true });
+  $("#conversation-search").addEventListener("input", renderConversationList);
+  $("#status-filter").addEventListener("change", () => loadConversations());
+  initTabs();
+  toggleRunType();
+  checkHealth();
+  loadScenarios().then(toggleRunType);
+  try { await loadConversations({ selectFirst: true }); } catch (error) { showToast(error.message); }
+  setInterval(checkHealth, 30000);
+  setInterval(() => loadConversations().catch(() => {}), 10000);
+}
+
+window.addEventListener("beforeunload", closeEventSource);
+init();
