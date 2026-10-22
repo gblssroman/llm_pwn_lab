@@ -63,12 +63,22 @@ class Attack(StrictModel):
     id: Identifier
     title: str
     category: str
-    prompt: str
+    prompt_a: str = Field(min_length=1, max_length=100_000)
+    prompt_b: str = Field(min_length=1, max_length=100_000)
     vagrantfile: str
     setup_script: str
     sandbox_service: Service
     checks: list[Check] = Field(min_length=1)
     metadata: dict[str, str]
+
+    @field_validator("prompt_a", "prompt_b")
+    @classmethod
+    def prompt_not_blank(cls, value):
+        """Отклоняет пустые и состоящие только из пробелов промпты агентов."""
+        value = value.strip()
+        if not value:
+            raise ValueError("scenario agent prompts cannot be blank")
+        return value
 
 
 class ExecRequest(StrictModel):

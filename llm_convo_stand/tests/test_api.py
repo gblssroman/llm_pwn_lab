@@ -30,6 +30,11 @@ def test_frontend_and_empty_history_are_served(tmp_path) -> None:
     assert 'name="agent_b_base_url"' in frontend.text
     assert 'name="agent_a_model"' in frontend.text
     assert 'name="agent_b_model"' in frontend.text
+    assert 'name="agent_a_instructions"' in frontend.text
+    assert 'name="agent_b_instructions"' in frontend.text
+    assert 'name="agent_a_system_prompt"' not in frontend.text
+    assert 'name="agent_b_system_prompt"' not in frontend.text
+    assert frontend.text.count("Additional instructions (optional)") == 2
     assert 'name="agent_a_top_p" type="number" min="0.01" max="1" step="0.01"' in frontend.text
     assert 'name="agent_b_top_p" type="number" min="0.01" max="1" step="0.01"' in frontend.text
     assert frontend.text.count("Generation and context settings") == 2
@@ -44,6 +49,7 @@ def test_frontend_and_empty_history_are_served(tmp_path) -> None:
     assert "function conversationTimeline" in javascript.text
     assert '"agent_react_step"' in javascript.text
     assert '"tool_started"' in javascript.text
+    assert 'benchmark ? "additional_instructions" : "system_prompt"' in javascript.text
     assert "followLiveOutput" in javascript.text
     assert "event.deltaY < 0" in javascript.text
     assert markdown.status_code == 200
@@ -94,6 +100,8 @@ def test_benchmark_catalog_filters_unsupported_memory_poisoning(tmp_path) -> Non
                 title="Tool misuse",
                 category="test",
                 mode="agent",
+                prompt_a="Scenario A instructions.",
+                prompt_b="Scenario B instructions.",
             )
 
     app = create_app(

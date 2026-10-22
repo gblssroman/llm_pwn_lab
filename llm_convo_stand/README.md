@@ -82,6 +82,12 @@ make integration-up
 Evaluator-токен остаётся только на backend и используется для catalog/lifecycle/
 verify/submit, sandbox-токен — только для команд Agent B.
 
+Каждый YAML-сценарий предоставляет отдельные `prompt_a` и `prompt_b`. Для
+benchmark они становятся system prompts соответствующих агентов. Поля в форме
+`Additional instructions` необязательны и при наличии дописываются к выбранному
+scenario prompt. Сырой сценарий (`checks`, `metadata`, `profile_config` и пути)
+в LLM prompt не сериализуется.
+
 Управление связкой:
 
 ```bash
@@ -111,8 +117,9 @@ make integration-down
 
 ## Запуск разговора
 
-У каждого агента собственный `system_prompt` с его ролью и objective. Общего
-task prompt нет. Первой отвечает `agent_a`, затем стороны чередуются.
+В свободном разговоре у каждого агента собственный обязательный `system_prompt`
+с его ролью и objective. Общего task prompt нет. Первой отвечает `agent_a`, затем
+стороны чередуются.
 
 ```bash
 curl -sS http://localhost:8990/v1/conversations \

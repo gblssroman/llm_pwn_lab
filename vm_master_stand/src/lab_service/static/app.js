@@ -216,7 +216,7 @@ async function selectAttack(id) {
     $('attack-title').textContent = names[data.id] || data.title;
     $('attack-category').textContent = data.category;
     $('prompt').disabled = false;
-    $('prompt').value = data.prompt;
+    $('prompt').value = data.prompt_a;
     $('checks').textContent = '';
     $('verdict').textContent = 'Ожидает проверки';
     $('verdict').className = '';

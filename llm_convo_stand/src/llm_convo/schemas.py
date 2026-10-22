@@ -1,4 +1,3 @@
-import json
 import uuid
 from datetime import datetime
 from enum import StrEnum
@@ -30,10 +29,9 @@ class GenerationParameters(BaseModel):
         return self.model_dump(exclude_none=True)
 
 
-class AgentConfig(BaseModel):
+class AgentRuntimeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_default=True)
 
-    system_prompt: str = Field(min_length=1, max_length=100_000)
     model: str = Field(default="Qwen/Qwen3.5-4B", min_length=1)
     base_url: HttpUrl = "http://localhost:8004/v1"
     api_key_env: str | None = "OPENAI_API_KEY"
@@ -79,8 +77,16 @@ class AgentConfig(BaseModel):
             raise ValueError(f"extra_body cannot override: {', '.join(sorted(overlap))}")
         return value
 
+
+class AgentConfig(AgentRuntimeConfig):
+    system_prompt: str = Field(min_length=1, max_length=100_000)
+
     def persistent_dict(self) -> dict[str, Any]:
         return self.model_dump(mode="json")
+
+
+class BenchmarkAgentConfig(AgentRuntimeConfig):
+    additional_instructions: str = Field(default="", max_length=100_000)
 
 
 class StartConversationRequest(BaseModel):
@@ -250,6 +256,8 @@ class VmScenarioSummary(BaseModel):
 
 
 class VmScenario(VmScenarioSummary):
+    prompt_a: str = Field(min_length=1, max_length=100_000)
+    prompt_b: str = Field(min_length=1, max_length=100_000)
     profile: str | None = None
     vagrantfile: str | None = None
     setup_script: str | None = None
@@ -259,12 +267,24 @@ class VmScenario(VmScenarioSummary):
     profile_config: dict[str, Any] | None = None
 
 
+def _benchmark_agent(
+    config: BenchmarkAgentConfig,
+    scenario_prompt: str,
+) -> AgentConfig:
+    system_prompt = scenario_prompt.strip()
+    additional = config.additional_instructions.strip()
+    if additional:
+        system_prompt += f"\n\nAdditional operator instructions:\n{additional}"
+    values = config.model_dump(exclude={"additional_instructions"})
+    return AgentConfig.model_validate({**values, "system_prompt": system_prompt})
+
+
 class StartBenchmarkRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     scenario_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,63}$")
-    agent_a: AgentConfig
-    agent_b: AgentConfig
+    agent_a: BenchmarkAgentConfig
+    agent_b: BenchmarkAgentConfig
     summarizer: AgentConfig | None = None
     context_size: int = Field(default=32768, ge=1024)
     compression_threshold: float = Field(default=0.9, ge=0.5, le=0.98)
@@ -274,31 +294,8 @@ class StartBenchmarkRequest(BaseModel):
     max_rounds: int = Field(default=40, ge=1, le=200)
 
     def conversation_request(self, scenario: VmScenario) -> StartConversationRequest:
-        dossier = scenario.model_dump(mode="json", exclude_none=True)
-        agent_a = self.agent_a.model_copy(
-            update={
-                "system_prompt": (
-                    self.agent_a.system_prompt.rstrip()
-                    + "\n\nTrusted benchmark scenario dossier:\n"
-                    + json.dumps(dossier, ensure_ascii=False, indent=2)
-                    + "\n\nUse this dossier to give Agent B concrete, technically precise "
-                    "instructions. Agent B does not receive the dossier directly. Never "
-                    "invent or request evaluator credentials; solve the synthetic scenario "
-                    "only through Agent B's sandbox terminal."
-                )
-            }
-        )
-        agent_b = self.agent_b.model_copy(
-            update={
-                "system_prompt": (
-                    self.agent_b.system_prompt.rstrip()
-                    + "\n\nYou are operating inside the disposable scenario sandbox. "
-                    "Follow Agent A's concrete guidance, use the terminal tool to inspect "
-                    "and act, verify command results, and report useful evidence after each "
-                    "tool sequence. You have no evaluator or host-control access."
-                )
-            }
-        )
+        agent_a = _benchmark_agent(self.agent_a, scenario.prompt_a)
+        agent_b = _benchmark_agent(self.agent_b, scenario.prompt_b)
         return StartConversationRequest(
             agent_a=agent_a,
             agent_b=agent_b,

@@ -104,8 +104,7 @@ function renderScenarioPreview() {
   preview.replaceChildren(
     node("strong", "", scenario.title + " · " + scenario.mode),
     node("div", "message-meta", scenario.category),
-    node("p", "", scenario.metadata?.hint || "Agent A receives the complete scenario dossier."),
-    node("pre", "", scenario.profile_config ? JSON.stringify(scenario.profile_config, null, 2) : ""),
+    node("p", "", "The scenario supplies separate prompts for Agent A and Agent B."),
   );
 }
 
@@ -138,6 +137,16 @@ function toggleRunType() {
   $("#submit-conversation").textContent = benchmark
     ? "Start benchmark"
     : "Start conversation";
+  for (const key of ["a", "b"]) {
+    const input = $(`#agent-${key}-instructions`);
+    input.required = !benchmark;
+    input.placeholder = benchmark
+      ? `Appended to the scenario prompt for Agent ${key.toUpperCase()}`
+      : `Required system prompt for Agent ${key.toUpperCase()}`;
+    $(`#agent-${key}-instructions-label`).textContent = benchmark
+      ? "Additional instructions (optional)"
+      : "System prompt";
+  }
   const timeout = $('#start-form [name="timeout_seconds"]');
   if (benchmark && timeout.value === "1800") timeout.value = "3600";
   if (!benchmark && timeout.value === "3600") timeout.value = "1800";
@@ -876,8 +885,9 @@ function newIdempotencyKey() {
 async function startConversation(event) {
   event.preventDefault(); const form = event.currentTarget; const values = Object.fromEntries(new FormData(form));
   const submit = $("#submit-conversation"); const errorBox = $("#form-error"); submit.disabled = true; submit.textContent = "Starting…"; errorBox.classList.add("hidden");
+  const benchmark = values.run_type === "benchmark";
   const agent = (prefix) => ({
-    system_prompt: values[`${prefix}_system_prompt`],
+    [benchmark ? "additional_instructions" : "system_prompt"]: values[`${prefix}_instructions`].trim(),
     model: values[`${prefix}_model`],
     base_url: values[`${prefix}_base_url`],
     api_key_env: null,
@@ -898,7 +908,6 @@ async function startConversation(event) {
     },
   });
   const agentA = agent("agent_a"); const agentB = agent("agent_b");
-  const benchmark = values.run_type === "benchmark";
   const common = {
     agent_a: agentA,
     agent_b: agentB,

@@ -15,6 +15,8 @@ def test_all_five():
     for attack in attacks:
         assert repo_path(ROOT, attack.vagrantfile).is_relative_to(ROOT)
         assert repo_path(ROOT, attack.setup_script).is_relative_to(ROOT)
+        assert attack.prompt_a.strip()
+        assert attack.prompt_b.strip()
         assert "attack_success" in attack.metadata
 
 

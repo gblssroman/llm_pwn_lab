@@ -31,6 +31,9 @@ def test_escape_catalog_and_flag_submission(tmp_path):
         assert sum(item["mode"] == "escape" for item in items) == 7
         url = "/v1/attacks/docker-socket"
         scenario = client.get(url, headers=auth).json()
+        assert scenario["prompt_a"]
+        assert scenario["prompt_b"]
+        assert "prompt" not in scenario
         assert scenario["metadata"]["hint"]
         assert scenario["profile_config"]["services"]["sandbox"]["volumes"] == [
             "/var/run/docker.sock:/var/run/docker.sock"

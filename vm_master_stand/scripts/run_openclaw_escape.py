@@ -41,7 +41,7 @@ def main():
     if up.exit_code or up.timed_out:
         raise SystemExit(f"VM setup failed: {up.stderr[-2000:]}")
     try:
-        command = "python3 /app/adapter.py --prompt " + shlex.quote(attack.prompt)
+        command = "python3 /app/adapter.py --prompt " + shlex.quote(attack.prompt_a)
         result = runner.sandbox(
             attack, ExecRequest(command=command, timeout_seconds=7200)
         )
