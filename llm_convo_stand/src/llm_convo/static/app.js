@@ -45,6 +45,13 @@ function fmtDate(value) {
   if (!value) return "—";
   return new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
 }
+function fmtDateTime(value) {
+  if (!value) return "—";
+  return new Intl.DateTimeFormat("ru-RU", {
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit",
+  }).format(new Date(value));
+}
 function fmtDuration(ms) {
   if (ms == null) return "—";
   return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`;
@@ -92,6 +99,13 @@ function selectedScenario() {
   return state.scenarios.find((item) => item.id === $("#scenario-id").value) || null;
 }
 
+function populateScenarioPrompts() {
+  const scenario = selectedScenario();
+  if (!scenario || $("#run-type").value !== "benchmark") return;
+  $("#agent-a-system-prompt").value = scenario.prompt_a;
+  $("#agent-b-system-prompt").value = scenario.prompt_b;
+}
+
 function renderScenarioPreview() {
   const preview = $("#scenario-preview");
   const scenario = selectedScenario();
@@ -104,7 +118,7 @@ function renderScenarioPreview() {
   preview.replaceChildren(
     node("strong", "", scenario.title + " · " + scenario.mode),
     node("div", "message-meta", scenario.category),
-    node("p", "", "The scenario supplies separate prompts for Agent A and Agent B."),
+    node("p", "", "The scenario prompts are loaded below and can be edited before the run."),
   );
 }
 
@@ -125,6 +139,8 @@ async function loadScenarios() {
     $("#scenario-preview").textContent = "Cannot load scenarios: " + error.message;
   }
   renderScenarioPreview();
+  populateScenarioPrompts();
+  renderConversationList();
 }
 
 function toggleRunType() {
@@ -137,16 +153,6 @@ function toggleRunType() {
   $("#submit-conversation").textContent = benchmark
     ? "Start benchmark"
     : "Start conversation";
-  for (const key of ["a", "b"]) {
-    const input = $(`#agent-${key}-instructions`);
-    input.required = !benchmark;
-    input.placeholder = benchmark
-      ? `Appended to the scenario prompt for Agent ${key.toUpperCase()}`
-      : `Required system prompt for Agent ${key.toUpperCase()}`;
-    $(`#agent-${key}-instructions-label`).textContent = benchmark
-      ? "Additional instructions (optional)"
-      : "System prompt";
-  }
   const timeout = $('#start-form [name="timeout_seconds"]');
   if (benchmark && timeout.value === "1800") timeout.value = "3600";
   if (!benchmark && timeout.value === "3600") timeout.value = "1800";
@@ -181,7 +187,20 @@ function scheduleLangfuseRefresh() {
 function renderConversationList() {
   const list = $("#conversation-list");
   const search = $("#conversation-search").value.trim().toLowerCase();
-  const items = state.conversations.filter((item) => !search || item.agent_a_system_prompt.toLowerCase().includes(search) || item.id.includes(search));
+  const scenarioFor = (item) => state.scenarios.find((scenario) => {
+    if (item.benchmark_scenario_id) return scenario.id === item.benchmark_scenario_id;
+    const prompt = item.agent_a_system_prompt.trim();
+    const scenarioPrompt = scenario.prompt_a.trim();
+    return prompt === scenarioPrompt;
+  });
+  const items = state.conversations.filter((item) => {
+    if (!search) return true;
+    const scenario = scenarioFor(item);
+    return item.agent_a_system_prompt.toLowerCase().includes(search)
+      || item.id.includes(search)
+      || scenario?.id.includes(search)
+      || scenario?.title.toLowerCase().includes(search);
+  });
   list.replaceChildren();
   if (!items.length) {
     list.append(node("div", "empty-list", "No conversations found."));
@@ -192,9 +211,11 @@ function renderConversationList() {
     card.dataset.id = item.id;
     const top = node("div", "conversation-card-top");
     top.append(node("span", `status-pill ${item.status}`, statusLabel(item.status)), node("span", "message-meta", `${item.turn_count} turns`));
-    card.append(top, node("div", "conversation-card-title", item.agent_a_system_prompt));
+    const scenario = scenarioFor(item);
+    const title = scenario?.title || compact(item.agent_a_system_prompt);
+    card.append(top, node("div", "conversation-card-title", title));
     const meta = node("div", "conversation-card-meta");
-    meta.append(node("span", "", shortId(item.id)), node("span", "", fmtDate(item.updated_at)));
+    meta.append(node("span", "", fmtDateTime(item.created_at)), node("span", "", shortId(item.id)));
     card.append(meta);
     card.addEventListener("click", () => selectConversation(item.id));
     list.append(card);
@@ -272,7 +293,6 @@ function renderHeader() {
   $("#conversation-meta").textContent = benchmark
     ? shortId(convo.id) + " · " + benchmark.scenario_id + " · " + statusLabel(benchmark.stage)
     : shortId(convo.id) + " · " + statusLabel(convo.status) + " · next " + convo.next_speaker;
-  $("#agent-a-prompt").textContent = agentAPrompt;
   const isTerminal = terminalStatuses.has(convo.status);
   $("#stop-conversation").classList.toggle("hidden", Boolean(benchmark) || isTerminal);
   $("#finish-benchmark").classList.toggle(
@@ -286,6 +306,21 @@ function renderHeader() {
   const link = $("#langfuse-link");
   link.classList.toggle("hidden", !convo.langfuse_url);
   if (convo.langfuse_url) link.href = convo.langfuse_url;
+}
+
+function openPromptDialog(agentKey) {
+  const convo = state.conversation;
+  if (!convo) return;
+  const agentName = agentKey === "agent_a" ? "Agent A" : "Agent B";
+  $("#prompt-dialog-title").textContent = `${agentName} system prompt`;
+  const content = $("#prompt-dialog-content");
+  content.textContent = convo.config[agentKey].system_prompt;
+  content.scrollTop = 0;
+  $("#prompt-dialog").showModal();
+}
+
+function closePromptDialog() {
+  $("#prompt-dialog").close();
 }
 
 function renderStats() {
@@ -324,6 +359,19 @@ function activeToolCall() {
   return event?.event_type === "tool_started" ? event.payload : null;
 }
 
+function verificationInProgress() {
+  const event = [...state.events].reverse().find(
+    (item) => [
+      "benchmark_verification_started",
+      "benchmark_progress_checked",
+      "benchmark_progress_check_failed",
+      "benchmark_verified",
+      "benchmark_evaluation_failed",
+    ].includes(item.event_type),
+  );
+  return event?.event_type === "benchmark_verification_started";
+}
+
 function currentActivity() {
   const convo = state.conversation;
   const run = state.benchmark;
@@ -338,6 +386,10 @@ function currentActivity() {
   if (state.liveDraft) {
     const agent = state.liveDraft.speaker === "agent_a" ? "Agent A" : "Agent B";
     return { tone: "active", title: `${agent} is generating`, detail: state.liveDraft.model || "Waiting for model output" };
+  }
+
+  if (run?.stage === "conversation" && verificationInProgress()) {
+    return { tone: "active", title: "Checking benchmark", detail: "Running scenario checks after Agent B turn" };
   }
 
   if (run) {
@@ -804,6 +856,9 @@ function connectEventSource(id) {
     "tool_started",
     "tool_completed",
     "benchmark_flag_submitted",
+    "benchmark_verification_started",
+    "benchmark_progress_checked",
+    "benchmark_progress_check_failed",
     "benchmark_verified",
     "benchmark_evaluation_failed",
     "benchmark_cleanup_failed",
@@ -871,6 +926,7 @@ async function openDialog() {
   toggleRunType();
   if (!state.scenarios.length) await loadScenarios();
   toggleRunType();
+  populateScenarioPrompts();
 }
 function closeDialog() { $("#start-dialog").close(); }
 
@@ -887,7 +943,7 @@ async function startConversation(event) {
   const submit = $("#submit-conversation"); const errorBox = $("#form-error"); submit.disabled = true; submit.textContent = "Starting…"; errorBox.classList.add("hidden");
   const benchmark = values.run_type === "benchmark";
   const agent = (prefix) => ({
-    [benchmark ? "additional_instructions" : "system_prompt"]: values[`${prefix}_instructions`].trim(),
+    system_prompt: values[`${prefix}_system_prompt`].trim(),
     model: values[`${prefix}_model`],
     base_url: values[`${prefix}_base_url`],
     api_key_env: null,
@@ -959,12 +1015,21 @@ async function init() {
   $("#empty-new").addEventListener("click", openDialog);
   $("#close-dialog").addEventListener("click", closeDialog);
   $("#cancel-dialog").addEventListener("click", closeDialog);
+  $("#agent-a-prompt-button").addEventListener("click", () => openPromptDialog("agent_a"));
+  $("#agent-b-prompt-button").addEventListener("click", () => openPromptDialog("agent_b"));
+  $("#close-prompt-dialog").addEventListener("click", closePromptDialog);
   $("#start-form").addEventListener("submit", startConversation);
   $("#stop-conversation").addEventListener("click", stopConversation);
   $("#finish-benchmark").addEventListener("click", () => runBenchmarkAction("finish"));
   $("#abort-benchmark").addEventListener("click", () => runBenchmarkAction("abort"));
-  $("#run-type").addEventListener("change", toggleRunType);
-  $("#scenario-id").addEventListener("change", renderScenarioPreview);
+  $("#run-type").addEventListener("change", () => {
+    toggleRunType();
+    populateScenarioPrompts();
+  });
+  $("#scenario-id").addEventListener("change", () => {
+    renderScenarioPreview();
+    populateScenarioPrompts();
+  });
   $("#start-form").addEventListener("invalid", (event) => {
     const details = event.target.closest("details"); if (details) details.open = true;
     const errorBox = $("#form-error"); errorBox.textContent = "Check the highlighted field."; errorBox.classList.remove("hidden");

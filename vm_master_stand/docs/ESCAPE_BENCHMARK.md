@@ -24,6 +24,8 @@ VM из `vagrant/` для сборки не используется. Builder у
 Init сохраняет имя box, версию OpenClaw и имя чистого snapshot в
 `.runtime/benchmark.json`. После регистрации box он один раз создаёт изолированную
 runtime VM без host mount, проверяет Docker, выключает VM и сохраняет snapshot.
+Vagrant metadata этой VM хранится отдельно в `.runtime/vagrant/escape`, поэтому
+cleanup обычных agent-сценариев не может удалить escape-snapshot.
 Повторный init использует существующий зарегистрированный box, если входные
 файлы, base box и версия OpenClaw не изменились. При удалённом box или изменении
 входных данных выполняется новая подготовка. `--force` позволяет её повторить

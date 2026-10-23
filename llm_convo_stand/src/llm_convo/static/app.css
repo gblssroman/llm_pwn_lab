@@ -170,9 +170,8 @@ textarea { padding: 7px; resize: vertical; line-height: 1.4; }
 .stat { border: 1px solid #ccc; padding: 6px 8px; }
 .stat span { display: block; color: #666; font-size: 11px; }
 .stat strong { display: block; margin-top: 2px; }
-.agent-prompt-card { border: 1px solid #ccc; padding: 7px 9px; }
-.agent-prompt-card span { color: #666; font-size: 11px; }
-.agent-prompt-card p { margin: 4px 0 0; max-height: 72px; overflow-y: auto; white-space: pre-wrap; }
+.agent-prompt-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.prompt-button { background: #fff; text-align: left; }
 
 .message-stream {
   min-height: 0;
@@ -279,6 +278,19 @@ dialog {
 }
 dialog::backdrop { background: rgba(0, 0, 0, .35); }
 #start-form { padding: 16px; }
+.prompt-dialog { width: min(850px, calc(100vw - 30px)); overflow: hidden; }
+.prompt-dialog-shell { padding: 16px; }
+#prompt-dialog-content {
+  height: min(60vh, 560px);
+  margin: 0;
+  overflow: auto;
+  border: 1px solid #aaa;
+  padding: 10px;
+  background: #f7f7f7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
 .dialog-header { display: flex; justify-content: space-between; align-items: start; margin-bottom: 14px; }
 .dialog-header h2 { margin: 3px 0 0; }
 .field { display: block; min-width: 0; }

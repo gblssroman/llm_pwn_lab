@@ -30,11 +30,9 @@ def test_frontend_and_empty_history_are_served(tmp_path) -> None:
     assert 'name="agent_b_base_url"' in frontend.text
     assert 'name="agent_a_model"' in frontend.text
     assert 'name="agent_b_model"' in frontend.text
-    assert 'name="agent_a_instructions"' in frontend.text
-    assert 'name="agent_b_instructions"' in frontend.text
-    assert 'name="agent_a_system_prompt"' not in frontend.text
-    assert 'name="agent_b_system_prompt"' not in frontend.text
-    assert frontend.text.count("Additional instructions (optional)") == 2
+    assert 'name="agent_a_system_prompt"' in frontend.text
+    assert 'name="agent_b_system_prompt"' in frontend.text
+    assert "Additional instructions" not in frontend.text
     assert 'name="agent_a_top_p" type="number" min="0.01" max="1" step="0.01"' in frontend.text
     assert 'name="agent_b_top_p" type="number" min="0.01" max="1" step="0.01"' in frontend.text
     assert frontend.text.count("Generation and context settings") == 2
@@ -49,7 +47,9 @@ def test_frontend_and_empty_history_are_served(tmp_path) -> None:
     assert "function conversationTimeline" in javascript.text
     assert '"agent_react_step"' in javascript.text
     assert '"tool_started"' in javascript.text
-    assert 'benchmark ? "additional_instructions" : "system_prompt"' in javascript.text
+    assert "function populateScenarioPrompts" in javascript.text
+    assert 'system_prompt: values[`${prefix}_system_prompt`].trim()' in javascript.text
+    assert "additional_instructions" not in javascript.text
     assert "followLiveOutput" in javascript.text
     assert "event.deltaY < 0" in javascript.text
     assert markdown.status_code == 200
@@ -62,6 +62,14 @@ def test_frontend_and_empty_history_are_served(tmp_path) -> None:
     assert 'name="max_tool_calls_per_b_turn"' in frontend.text
     assert "Finish &amp; evaluate" in frontend.text
     assert "Agent A system prompt" in frontend.text
+    assert "Agent B system prompt" in frontend.text
+    assert 'id="prompt-dialog"' in frontend.text
+    assert 'id="prompt-dialog-content"' in frontend.text
+    assert "function openPromptDialog" in javascript.text
+    assert "function fmtDateTime" in javascript.text
+    assert "const scenarioFor = (item)" in javascript.text
+    assert "fmtDateTime(item.created_at)" in javascript.text
+    assert "height: min(60vh, 560px)" in stylesheet.text
     assert 'name="task_prompt"' not in frontend.text
     assert "system-dot" not in frontend.text
     assert "Backend status" in frontend.text

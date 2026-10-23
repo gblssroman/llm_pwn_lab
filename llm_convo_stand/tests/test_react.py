@@ -3,7 +3,7 @@ from typing import Any
 import pytest
 
 from llm_convo.llm import LLMResult, ToolCall
-from llm_convo.react import AgentBReactGraph
+from llm_convo.react import AgentBReactGraph, _aggregate
 
 
 def result(
@@ -62,5 +62,33 @@ async def test_react_graph_executes_terminal_and_forces_final_answer_at_budget()
     assert final.content == "final answer"
     assert final.metadata["react_model_calls"] == 2
     assert final.metadata["react_tool_calls"] == 1
+    assert final.metadata["react_unresolved_tool_calls"] == 0
     assert [(item.id, ordinal) for item, ordinal in executions] == [("call-1", 1)]
     assert observed == [("", 1, True), ("final answer", 2, False)]
+
+
+def test_aggregate_drops_tool_call_ignored_by_model_after_budget() -> None:
+    final = _aggregate(
+        [
+            result(
+                "Let me inspect further.",
+                tool_calls=[
+                    ToolCall(
+                        id="call-2",
+                        name="terminal",
+                        arguments={"command": "lsblk -f"},
+                    )
+                ],
+            )
+        ],
+        tool_calls_used=1,
+    )
+
+    assert final.finish_reason == "stop"
+    assert final.tool_calls == []
+    assert final.metadata["react_tool_calls"] == 1
+    assert final.metadata["react_unresolved_tool_calls"] == 1
+    assert final.content == (
+        "Let me inspect further.\n\n"
+        "[Terminal-call budget exhausted; the final requested tool call was not executed.]"
+    )

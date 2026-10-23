@@ -76,6 +76,7 @@ def _conversation_summary(conversation: Conversation) -> ConversationSummary:
         error=conversation.error,
         agent_a_model=conversation.config["agent_a"]["model"],
         agent_b_model=conversation.config["agent_b"]["model"],
+        benchmark_scenario_id=conversation.config.get("benchmark_scenario_id"),
     )
 
 

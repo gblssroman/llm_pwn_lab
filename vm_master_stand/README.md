@@ -209,11 +209,14 @@ lifecycle или невозможность запуска Vagrant. Ненуле
 в JSON с HTTP 200. Таймаут exec: 1–300 секунд; lifecycle: 900 секунд по умолчанию.
 
 YAML задаёт Vagrantfile и setup script, но не исполняемую программу хоста.
-Runner передаёт `VAGRANT_VAGRANTFILE`, `VAGRANT_CWD`, `LAB_SETUP_SCRIPT`, `LAB_REPO_ROOT`;
+Runner передаёт `VAGRANT_VAGRANTFILE`, `VAGRANT_CWD`, `VAGRANT_DOTFILE_PATH`,
+`LAB_SETUP_SCRIPT`, `LAB_REPO_ROOT`;
 см. [переменные Vagrant](https://developer.hashicorp.com/vagrant/docs/other/environmental-variables).
 Lifecycle и verify используют общий потоковый и файловый lock по Vagrantfile,
-включая разные процессы сервера. Все сценарии используют одну VM. Не выполняйте
-exec во время up/down и не изменяйте target во время verify.
+включая разные процессы сервера. Agent- и escape-сценарии используют отдельные
+Vagrant state и VM; общий lock сохраняет последовательное выполнение. Поэтому
+удаление agent-VM не затрагивает чистый snapshot escape-VM. Не выполняйте exec во
+время up/down и не изменяйте target во время verify.
 
 ## Сценарии и семантика результата
 

@@ -90,10 +90,16 @@ def _aggregate(results: list[LLMResult], tool_calls_used: int) -> LLMResult:
     if not results:
         raise RuntimeError("Agent B graph completed without a model response")
     final = results[-1]
-    if final.tool_calls:
-        raise RuntimeError("Agent B graph ended with unresolved tool calls")
+    unresolved_tool_calls = len(final.tool_calls)
+    content = final.content
+    if unresolved_tool_calls:
+        notice = (
+            "[Terminal-call budget exhausted; the final requested tool call was "
+            "not executed.]"
+        )
+        content = f"{content.rstrip()}\n\n{notice}" if content.strip() else notice
     return LLMResult(
-        content=final.content,
+        content=content,
         prompt_tokens=(
             sum(item.prompt_tokens or 0 for item in results)
             if any(item.prompt_tokens is not None for item in results)
@@ -109,7 +115,7 @@ def _aggregate(results: list[LLMResult], tool_calls_used: int) -> LLMResult:
             if any(item.total_tokens is not None for item in results)
             else None
         ),
-        finish_reason=final.finish_reason,
+        finish_reason="stop" if unresolved_tool_calls else final.finish_reason,
         latency_ms=sum(item.latency_ms for item in results),
         first_token_ms=next(
             (item.first_token_ms for item in results if item.first_token_ms is not None),
@@ -121,6 +127,7 @@ def _aggregate(results: list[LLMResult], tool_calls_used: int) -> LLMResult:
             **final.metadata,
             "react_model_calls": len(results),
             "react_tool_calls": tool_calls_used,
+            "react_unresolved_tool_calls": unresolved_tool_calls,
         },
     )
 

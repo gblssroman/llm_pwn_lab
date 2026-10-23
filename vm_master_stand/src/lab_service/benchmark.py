@@ -40,6 +40,13 @@ BOX_INPUTS = (
 )
 
 
+def vagrant_dotfile_path(root, mode):
+    """Возвращает отдельный Vagrant state для каждой семьи сценариев."""
+    if mode not in {"agent", "escape"}:
+        raise ValueError("Unknown benchmark mode")
+    return root / ".runtime" / "vagrant" / mode
+
+
 def build_box(base_box, name, output, version, root=None):
     """Создаёт и регистрирует подготовленный VirtualBox box в отдельной VM.
 
@@ -231,6 +238,7 @@ def _runtime_environment(root, box_name, version):
     environment.update(
         VAGRANT_CWD=str(root / "vagrant"),
         VAGRANT_VAGRANTFILE="Vagrantfile",
+        VAGRANT_DOTFILE_PATH=str(vagrant_dotfile_path(root, "escape")),
         LAB_REPO_ROOT=str(root),
         LAB_SETUP_SCRIPT=str(root / "vm/escape/setup.sh"),
         LAB_VAGRANT_BOX=box_name,

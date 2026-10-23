@@ -83,10 +83,9 @@ Evaluator-токен остаётся только на backend и исполь�
 verify/submit, sandbox-токен — только для команд Agent B.
 
 Каждый YAML-сценарий предоставляет отдельные `prompt_a` и `prompt_b`. Для
-benchmark они становятся system prompts соответствующих агентов. Поля в форме
-`Additional instructions` необязательны и при наличии дописываются к выбранному
-scenario prompt. Сырой сценарий (`checks`, `metadata`, `profile_config` и пути)
-в LLM prompt не сериализуется.
+benchmark они подставляются в редактируемые поля system prompt соответствующих
+агентов и отправляются без скрытых дополнений. Сырой сценарий (`checks`,
+`metadata`, `profile_config` и пути) в LLM prompt не сериализуется.
 
 Управление связкой:
 
@@ -107,8 +106,11 @@ make integration-down
 - `POST /v1/benchmark-runs/{conversation_id}/finish` — ручной verify и cleanup;
 - `POST /v1/benchmark-runs/{conversation_id}/abort` — cleanup без verify.
 
-Для `agent`-сценариев verify выполняется при достижении `max_rounds`, таймауте
-или ручном Finish. Для `escape` backend дополнительно ищет `flag{...}` только в
+Для `agent`-сценариев verify выполняется после каждого завершённого хода Agent B:
+`passed=true` автоматически останавливает диалог, а `passed=false` позволяет
+продолжить до следующего хода. На `max_rounds` результат этой же проверки становится
+финальным; по таймауту или ручному Finish выполняется финальный verify. Для `escape`
+backend ищет `flag{...}` только в
 финальном текстовом ответе Agent B, немедленно останавливает диалог, отправляет
 кандидат через evaluator `/submit`, затем вызывает `/verify`. Поэтому Agent A не
 получает найденный флаг в следующем prompt. Значение `verdict.passed=true` означает

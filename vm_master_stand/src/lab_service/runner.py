@@ -14,7 +14,7 @@ from pathlib import Path
 
 from filelock import FileLock
 
-from .benchmark import escape_config, escape_snapshot
+from .benchmark import escape_config, escape_snapshot, vagrant_dotfile_path
 from .jobs import log_sink
 from .models import ExecResult
 from .scenarios import repo_path
@@ -92,6 +92,11 @@ class Runner:
         path, setup = self.paths(attack)
         env = os.environ.copy()
         env.update(environment or {})
+        # Agent cleanup destroys only the disposable agent VM; the escape VM and
+        # its clean snapshot live in a separate Vagrant state directory.
+        env["VAGRANT_DOTFILE_PATH"] = str(
+            vagrant_dotfile_path(self.settings.root, attack.mode)
+        )
         # Vagrant/provisioning must never inherit control API credentials.
         env.pop("LAB_SANDBOX_TOKEN", None)
         env.pop("LAB_EVALUATOR_TOKEN", None)
@@ -116,7 +121,7 @@ class Runner:
             LAB_ESCAPE_PROFILE=attack.profile if attack.mode == "escape" else "",
         )
         if args and args[0] in {"destroy", "halt", "reload", "snapshot", "up"}:
-            self._invalidate_ssh(path)
+            self._invalidate_ssh(path, attack.mode)
         process = subprocess.Popen(
             ["vagrant", *args],
             cwd=path.parent,
@@ -149,15 +154,15 @@ class Runner:
             timed_out=timed_out,
         )
 
-    def _invalidate_ssh(self, path):
+    def _invalidate_ssh(self, path, mode):
         """Забывает endpoint после любого изменения состояния VM."""
         with self._ssh_guard:
-            self._ssh_targets.pop(str(path), None)
+            self._ssh_targets.pop((str(path), mode), None)
 
     def _ssh_target(self, attack):
         """Один раз читает `vagrant ssh-config` и проверяет локальный endpoint."""
         path, _ = self.paths(attack)
-        key = str(path)
+        key = (str(path), attack.mode)
         with self._ssh_guard:
             cached = self._ssh_targets.get(key)
         if cached is not None:
@@ -217,7 +222,8 @@ class Runner:
         if not isinstance(command, str) or not 0 < len(command) <= 200000:
             raise ValueError("Invalid remote command")
         hostname, port, user, identities = self._ssh_target(attack)
-        root_hash = hashlib.sha256(str(self.settings.root).encode()).hexdigest()[:12]
+        control_scope = f"{self.settings.root}\n{attack.mode}"
+        root_hash = hashlib.sha256(control_scope.encode()).hexdigest()[:12]
         control_directory = Path(f"/tmp/agentic-lab-{os.getuid()}/{root_hash}")
         control_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         control_directory.chmod(0o700)

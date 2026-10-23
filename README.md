@@ -24,7 +24,11 @@ make integration-init
 Повторный init использует box и snapshot из кеша. `integration-init` создаёт
 `.env.vm-master` с локальными токенами и UID/GID пользователя.
 
-Каждый benchmark последовательно восстанавливает snapshot, создаёт новый флаг и
+Agent- и escape-сценарии используют разные Vagrant state/VM, но один общий lock:
+прогоны остаются последовательными, а удаление agent-VM не затрагивает snapshot
+escape-VM.
+
+Каждый escape-benchmark последовательно восстанавливает snapshot, создаёт новый флаг и
 запускает выбранный профиль. После прогона snapshot восстанавливается ещё раз,
 а VM остаётся выключенной. Host-репозиторий в escape-VM не монтируется.
 

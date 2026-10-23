@@ -20,9 +20,10 @@ from llm_convo.tracing import Tracing
 
 
 class FakeVmMaster:
-    def __init__(self) -> None:
+    def __init__(self, verify_results: list[dict[str, Any]] | None = None) -> None:
         self.calls: list[tuple[str, str, str | None]] = []
         self.submissions: list[tuple[str, str]] = []
+        self.verify_results = list(verify_results or [])
 
     async def run_job(
         self,
@@ -44,6 +45,8 @@ class FakeVmMaster:
                 "timed_out": False,
             }
         if action == "verify":
+            if self.verify_results:
+                return self.verify_results.pop(0)
             return {"passed": True, "checks": [{"name": "synthetic", "passed": True}]}
         return {"exit_code": 0, "stdout": action, "stderr": "", "timed_out": False}
 
@@ -116,7 +119,7 @@ async def database(tmp_path):
     await engine.dispose()
 
 
-def test_benchmark_uses_scenario_prompts_and_optional_instructions() -> None:
+def test_benchmark_uses_editable_prompts_from_request() -> None:
     scenario = VmScenario(
         id="docker-socket",
         title="Docker socket",
@@ -130,29 +133,21 @@ def test_benchmark_uses_scenario_prompts_and_optional_instructions() -> None:
     request = StartBenchmarkRequest(
         scenario_id=scenario.id,
         agent_a=BenchmarkAgentConfig(
-            additional_instructions="Extra A instruction.", api_key_env=None
+            system_prompt="Edited Agent A prompt.", api_key_env=None
         ),
         agent_b=BenchmarkAgentConfig(
-            additional_instructions="Extra B instruction.", api_key_env=None
+            system_prompt="Edited Agent B prompt.", api_key_env=None
         ),
     )
 
-    conversation = request.conversation_request(scenario)
+    conversation = request.conversation_request()
 
     prompt_a = conversation.agent_a.system_prompt
     prompt_b = conversation.agent_b.system_prompt
-    assert prompt_a == (
-        "Private scenario instructions for A.\n\n"
-        "Additional operator instructions:\nExtra A instruction."
-    )
-    assert prompt_b == (
-        "Private scenario instructions for B.\n\n"
-        "Additional operator instructions:\nExtra B instruction."
-    )
+    assert prompt_a == "Edited Agent A prompt."
+    assert prompt_b == "Edited Agent B prompt."
     assert "Inspect the Docker daemon" not in prompt_a
     assert "docker.sock" not in prompt_a
-    assert request.agent_a.additional_instructions == "Extra A instruction."
-    assert request.agent_b.additional_instructions == "Extra B instruction."
 
 
 def test_benchmark_uses_scenario_prompts_verbatim_without_additions() -> None:
@@ -166,11 +161,11 @@ def test_benchmark_uses_scenario_prompts_verbatim_without_additions() -> None:
     )
     request = StartBenchmarkRequest(
         scenario_id=scenario.id,
-        agent_a=BenchmarkAgentConfig(api_key_env=None),
-        agent_b=BenchmarkAgentConfig(api_key_env=None),
+        agent_a=BenchmarkAgentConfig(system_prompt=scenario.prompt_a, api_key_env=None),
+        agent_b=BenchmarkAgentConfig(system_prompt=scenario.prompt_b, api_key_env=None),
     )
 
-    conversation = request.conversation_request(scenario)
+    conversation = request.conversation_request()
 
     assert conversation.agent_a.system_prompt == "Scenario A"
     assert conversation.agent_b.system_prompt == "Scenario B"
@@ -186,7 +181,7 @@ async def test_runner_recovers_pending_cleanup_without_claiming_conversation(dat
         prompt_a="Scenario A instructions.",
         prompt_b="Scenario B instructions.",
     )
-    agent = BenchmarkAgentConfig(api_key_env=None, stream="never")
+    agent = BenchmarkAgentConfig(system_prompt="Scenario prompt", api_key_env=None, stream="never")
     request = StartBenchmarkRequest(
         scenario_id=scenario.id,
         agent_a=agent,
@@ -195,6 +190,7 @@ async def test_runner_recovers_pending_cleanup_without_claiming_conversation(dat
     )
     service = BenchmarkService(database)
     created = await service.create(request, scenario, "benchmark-recovery")
+    assert created.conversation.config["benchmark_scenario_id"] == scenario.id
     vm = FakeVmMaster()
     coordinator = BenchmarkCoordinator(database, vm, RealtimeBroker())
     llm = ReactLLM("unused")
@@ -219,6 +215,67 @@ async def test_runner_recovers_pending_cleanup_without_claiming_conversation(dat
     assert run.cleanup_required is False
     assert vm.calls == []
     assert llm.requests == []
+
+
+@pytest.mark.asyncio
+async def test_agent_turn_verifies_until_checks_pass(database) -> None:
+    scenario = VmScenario(
+        id="tool-misuse",
+        title="Synthetic scenario",
+        category="test",
+        mode="agent",
+        prompt_a="Scenario A instructions.",
+        prompt_b="Scenario B instructions.",
+    )
+    agent = BenchmarkAgentConfig(system_prompt="Scenario prompt", api_key_env=None, stream="never")
+    request = StartBenchmarkRequest(
+        scenario_id=scenario.id,
+        agent_a=agent,
+        agent_b=agent,
+        max_rounds=5,
+    )
+    failed = {"passed": False, "checks": [{"name": "synthetic", "passed": False}]}
+    passed = {"passed": True, "checks": [{"name": "synthetic", "passed": True}]}
+    service = BenchmarkService(database)
+    created = await service.create(request, scenario, "benchmark-auto-verify")
+    vm = FakeVmMaster([failed, passed])
+    coordinator = BenchmarkCoordinator(database, vm, RealtimeBroker())
+
+    await coordinator.prepare(created.conversation.id)
+    assert not await coordinator.after_turn(
+        created.conversation.id,
+        speaker="agent_a",
+        content="suggestion",
+        turn_count=1,
+    )
+    assert not await coordinator.after_turn(
+        created.conversation.id,
+        speaker="agent_b",
+        content="first attempt",
+        turn_count=2,
+    )
+    run, _ = (await service.get(created.conversation.id)) or (None, [])
+    assert run is not None
+    assert run.stage == "conversation"
+    assert run.verdict is None
+
+    assert await coordinator.after_turn(
+        created.conversation.id,
+        speaker="agent_b",
+        content="second attempt",
+        turn_count=4,
+    )
+    run, _ = (await service.get(created.conversation.id)) or (None, [])
+    assert run is not None
+    assert run.stage == "evaluating"
+    assert run.completion_reason == "checks_passed"
+    assert run.verdict == passed
+
+    await coordinator.finalize(created.conversation.id)
+    run, _ = (await service.get(created.conversation.id)) or (None, [])
+    assert run is not None
+    assert run.stage == "completed"
+    assert [action for _, action, _ in vm.calls] == ["up", "verify", "verify", "down"]
 
 
 @pytest.mark.asyncio
@@ -247,6 +304,7 @@ async def test_benchmark_runner_executes_react_evaluates_and_cleans_up(
         metadata={"attack_success": "passed=true means attack success"},
     )
     agent = BenchmarkAgentConfig(
+        system_prompt="Scenario prompt",
         api_key_env=None,
         stream="never",
         parameters=GenerationParameters(max_tokens=100),
@@ -286,6 +344,7 @@ async def test_benchmark_runner_executes_react_evaluates_and_cleans_up(
     assert run.stage == "completed"
     assert run.cleanup_required is False
     assert run.verdict and run.verdict["passed"] is True
+    assert run.completion_reason == ("checks_passed" if mode == "agent" else "flag_detected")
     expected_actions = ["up", "sandbox"]
     if mode == "escape":
         expected_actions.append("status")

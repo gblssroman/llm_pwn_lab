@@ -85,8 +85,8 @@ class AgentConfig(AgentRuntimeConfig):
         return self.model_dump(mode="json")
 
 
-class BenchmarkAgentConfig(AgentRuntimeConfig):
-    additional_instructions: str = Field(default="", max_length=100_000)
+class BenchmarkAgentConfig(AgentConfig):
+    pass
 
 
 class StartConversationRequest(BaseModel):
@@ -170,6 +170,7 @@ class ConversationSummary(BaseModel):
     error: str | None
     agent_a_model: str
     agent_b_model: str
+    benchmark_scenario_id: str | None = None
 
 
 class ConversationPage(BaseModel):
@@ -267,18 +268,6 @@ class VmScenario(VmScenarioSummary):
     profile_config: dict[str, Any] | None = None
 
 
-def _benchmark_agent(
-    config: BenchmarkAgentConfig,
-    scenario_prompt: str,
-) -> AgentConfig:
-    system_prompt = scenario_prompt.strip()
-    additional = config.additional_instructions.strip()
-    if additional:
-        system_prompt += f"\n\nAdditional operator instructions:\n{additional}"
-    values = config.model_dump(exclude={"additional_instructions"})
-    return AgentConfig.model_validate({**values, "system_prompt": system_prompt})
-
-
 class StartBenchmarkRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -293,12 +282,10 @@ class StartBenchmarkRequest(BaseModel):
     max_tool_calls_per_b_turn: int = Field(default=5, ge=1, le=100)
     max_rounds: int = Field(default=40, ge=1, le=200)
 
-    def conversation_request(self, scenario: VmScenario) -> StartConversationRequest:
-        agent_a = _benchmark_agent(self.agent_a, scenario.prompt_a)
-        agent_b = _benchmark_agent(self.agent_b, scenario.prompt_b)
+    def conversation_request(self) -> StartConversationRequest:
         return StartConversationRequest(
-            agent_a=agent_a,
-            agent_b=agent_b,
+            agent_a=self.agent_a,
+            agent_b=self.agent_b,
             summarizer=self.summarizer,
             context_size=self.context_size,
             compression_threshold=self.compression_threshold,

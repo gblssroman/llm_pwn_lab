@@ -41,7 +41,7 @@ class FakeRunner:
 @pytest.fixture
 def settings(tmp_path):
     shutil.copytree(ROOT / "attacks", tmp_path / "attacks")
-    for name in ("vagrant/Vagrantfile", "vm/setup.sh"):
+    for name in ("vagrant/Vagrantfile", "vm/setup.sh", "vm/escape/setup.sh"):
         target = tmp_path / name
         target.parent.mkdir(exist_ok=True)
         shutil.copyfile(ROOT / name, target)

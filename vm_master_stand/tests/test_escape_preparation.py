@@ -269,6 +269,9 @@ def test_runtime_snapshot_is_isolated_and_powered_off(monkeypatch, tmp_path):
     assert environment["LAB_ISOLATED_ESCAPE"] == "1"
     assert environment["LAB_VAGRANT_BOX"] == "lab/prepared"
     assert environment["LAB_OPENCLAW_VERSION"] == "2026.9.7"
+    assert environment["VAGRANT_DOTFILE_PATH"] == str(
+        root / ".runtime/vagrant/escape"
+    )
 
 
 def test_init_rebuilds_missing_box_and_does_not_publish_failed_build(

@@ -50,7 +50,9 @@ class BenchmarkService:
         idempotency_key: str,
     ) -> BenchmarkCreateResult:
         fingerprint = benchmark_fingerprint(body, scenario)
-        request = body.conversation_request(scenario)
+        request = body.conversation_request()
+        persistent_config = request.persistent_config()
+        persistent_config["benchmark_scenario_id"] = scenario.id
         async with self._sessions() as session:
             existing = await session.scalar(
                 select(Conversation).where(Conversation.idempotency_key == idempotency_key)
@@ -70,7 +72,7 @@ class BenchmarkService:
             conversation = Conversation(
                 id=uuid.uuid4(),
                 status=ConversationStatus.queued.value,
-                config=request.persistent_config(),
+                config=persistent_config,
                 context_size=request.context_size,
                 compression_threshold=request.compression_threshold,
                 retain_recent_messages=request.retain_recent_messages,
@@ -429,6 +431,38 @@ class BenchmarkCoordinator:
         run = await self.get_run(conversation_id)
         if run is None or run.stage != "conversation":
             return False
+        turn_verdict: dict[str, Any] | None = None
+        if run.scenario_mode == "agent":
+            try:
+                turn_verdict = await self._verify(conversation_id, run)
+                await self._event(
+                    conversation_id,
+                    "benchmark_progress_checked",
+                    {"verdict": turn_verdict},
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await self._event(
+                    conversation_id,
+                    "benchmark_progress_check_failed",
+                    {"error": str(exc)[:2_000]},
+                )
+            else:
+                if turn_verdict.get("passed") is True:
+                    started = await self.begin_evaluation(
+                        conversation_id,
+                        reason="checks_passed",
+                        final_status=ConversationStatus.completed,
+                        verdict=turn_verdict,
+                    )
+                    if started:
+                        await self._event(
+                            conversation_id,
+                            "benchmark_verified",
+                            {"verdict": turn_verdict, "automatic": True},
+                        )
+                    return started
         if run.scenario_mode == "escape":
             candidates = FLAG_PATTERN.findall(content)
             if candidates:
@@ -444,13 +478,43 @@ class BenchmarkCoordinator:
                 )
                 return True
         if turn_count // 2 >= run.max_rounds:
-            await self.begin_evaluation(
+            started = await self.begin_evaluation(
                 conversation_id,
                 reason="max_rounds",
                 final_status=ConversationStatus.completed,
+                verdict=turn_verdict,
             )
+            if started and turn_verdict is not None:
+                await self._event(
+                    conversation_id,
+                    "benchmark_verified",
+                    {"verdict": turn_verdict, "automatic": True},
+                )
             return True
         return False
+
+    async def _verify(
+        self,
+        conversation_id: uuid.UUID,
+        run: BenchmarkRun,
+    ) -> dict[str, Any]:
+        await self._event(
+            conversation_id,
+            "benchmark_verification_started",
+            {"automatic": run.stage == "conversation"},
+        )
+        verdict = await self.client.run_job(
+            run.scenario_id,
+            "verify",
+            on_log=lambda event: self._job_log(conversation_id, "verify", event),
+            wait_if_busy=True,
+        )
+        await self._event(
+            conversation_id,
+            "vm_job_completed",
+            {"action": "verify", "result": verdict},
+        )
+        return verdict
 
     async def begin_evaluation(
         self,
@@ -458,6 +522,7 @@ class BenchmarkCoordinator:
         *,
         reason: str,
         final_status: ConversationStatus = ConversationStatus.completed,
+        verdict: dict[str, Any] | None = None,
     ) -> bool:
         now = utc_now()
         async with self._sessions() as session, session.begin():
@@ -470,6 +535,8 @@ class BenchmarkCoordinator:
             run.stage = "evaluating"
             run.completion_reason = reason
             run.final_conversation_status = final_status.value
+            if verdict is not None:
+                run.verdict = verdict
             run.updated_at = now
             conversation.status = ConversationStatus.evaluating.value
             conversation.updated_at = now
@@ -588,22 +655,18 @@ class BenchmarkCoordinator:
                         "benchmark_flag_submitted",
                         {"submitted": True, "passed": submit.get("passed")},
                     )
-                verdict = await self.client.run_job(
-                    run.scenario_id,
-                    "verify",
-                    on_log=lambda event: self._job_log(conversation_id, "verify", event),
-                    wait_if_busy=True,
-                )
-                async with self._sessions() as session, session.begin():
-                    current = await session.get(BenchmarkRun, conversation_id)
-                    if current is not None:
-                        current.verdict = verdict
-                        current.updated_at = utc_now()
-                await self._event(
-                    conversation_id,
-                    "benchmark_verified",
-                    {"verdict": verdict},
-                )
+                if run.verdict is None:
+                    verdict = await self._verify(conversation_id, run)
+                    async with self._sessions() as session, session.begin():
+                        current = await session.get(BenchmarkRun, conversation_id)
+                        if current is not None:
+                            current.verdict = verdict
+                            current.updated_at = utc_now()
+                    await self._event(
+                        conversation_id,
+                        "benchmark_verified",
+                        {"verdict": verdict},
+                    )
             except Exception as exc:
                 evaluation_error = exc
                 async with self._sessions() as session, session.begin():

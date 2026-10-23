@@ -73,7 +73,7 @@ def test_escape_sandbox_uses_guest_copy(monkeypatch):
     )
 
 
-def test_direct_ssh_config_is_cached(settings, attack, monkeypatch):
+def test_direct_ssh_config_is_cached_per_mode(settings, attack, monkeypatch):
     identity = settings.root / "private_key"
     identity.write_text("test")
     runner = Runner(settings)
@@ -96,11 +96,20 @@ def test_direct_ssh_config_is_cached(settings, attack, monkeypatch):
 
     runner.remote(attack, "id", 30)
     runner.remote(attack, "true", 30)
+    escape = attack.model_copy(
+        update={
+            "mode": "escape",
+            "profile": "docker-socket",
+            "setup_script": "vm/escape/setup.sh",
+        }
+    )
+    runner.remote(escape, "id", 30)
 
-    vagrant.assert_called_once_with(attack, ["ssh-config"], 30)
-    assert popen.call_count == 2
+    assert vagrant.call_count == 2
+    assert vagrant.call_args.args == (escape, ["ssh-config"], 30)
+    assert popen.call_count == 3
     argv = popen.call_args.args[0]
-    assert argv[-3:] == ["--", "vagrant@127.0.0.1", "true"]
+    assert argv[-3:] == ["--", "vagrant@127.0.0.1", "id"]
     assert "ControlMaster=auto" in argv
 
 
@@ -114,11 +123,38 @@ def test_lifecycle_paths_and_environment(settings, attack, monkeypatch):
     runner.up(attack)
     kwargs = popen.call_args.kwargs
     assert kwargs["env"]["VAGRANT_VAGRANTFILE"] == "Vagrantfile"
+    assert kwargs["env"]["VAGRANT_DOTFILE_PATH"] == str(
+        settings.root / ".runtime/vagrant/agent"
+    )
     assert kwargs["cwd"] == settings.root / "vagrant"
     assert kwargs["env"]["LAB_SETUP_SCRIPT"] == str(settings.root / "vm/setup.sh")
     assert "LAB_EVALUATOR_TOKEN" not in kwargs["env"]
     runner.down(attack)
     assert popen.call_args.args[0] == ["vagrant", "destroy", "-f"]
+
+
+def test_agent_and_escape_use_separate_vagrant_state(settings, attack, monkeypatch):
+    process = Mock(pid=123, returncode=0)
+    process.communicate.return_value = (b"ok", b"")
+    popen = Mock(return_value=process)
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    runner = Runner(settings)
+    escape = attack.model_copy(
+        update={
+            "mode": "escape",
+            "profile": "docker-socket",
+            "setup_script": "vm/escape/setup.sh",
+        }
+    )
+
+    runner.run(attack, ["status"], 30)
+    agent_state = popen.call_args.kwargs["env"]["VAGRANT_DOTFILE_PATH"]
+    runner.run(escape, ["status"], 30)
+    escape_state = popen.call_args.kwargs["env"]["VAGRANT_DOTFILE_PATH"]
+
+    assert agent_state == str(settings.root / ".runtime/vagrant/agent")
+    assert escape_state == str(settings.root / ".runtime/vagrant/escape")
+    assert agent_state != escape_state
 
 
 def test_timeout_kills_process_group(settings, attack, monkeypatch):
@@ -138,7 +174,14 @@ def test_timeout_kills_process_group(settings, attack, monkeypatch):
 
 def test_shared_lifecycle_lock(settings, attack, monkeypatch):
     first, second = Runner(settings), Runner(settings)
-    other = Scenarios(settings.root).load("tool-misuse")
+    other = attack.model_copy(
+        update={
+            "mode": "escape",
+            "profile": "docker-socket",
+            "setup_script": "vm/escape/setup.sh",
+        }
+    )
+    monkeypatch.setattr("lab_service.runner.escape_snapshot", lambda _: "clean")
     assert first.lock_for(attack) is second.lock_for(other)
     active, maximum = 0, 0
     guard = threading.Lock()
