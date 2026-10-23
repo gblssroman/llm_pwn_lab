@@ -18,10 +18,8 @@ cd "$workspace"
 docker compose -f vm/agent-compose.yml down --volumes --remove-orphans
 docker compose -f vm/escape/compose.yml down --volumes --remove-orphans
 install -d -m 700 /opt/lab-target
-umask 077
-printf 'flag{%s}\n' "$(openssl rand -hex 20)" > /opt/lab-target/escape-flag.txt
-chmod 600 /opt/lab-target/escape-flag.txt
-printf '[lab] reset and new flag: %ss\n' "$((SECONDS - reset_started))"
+rm -f /opt/lab-target/escape-flag.txt
+printf '[lab] reset target: %ss\n' "$((SECONDS - reset_started))"
 lab_stage 'start containers' docker compose -f vm/escape/compose.yml -f "vm/escape/profiles/$profile.yml" up -d --no-build --pull never
 ready_started=$SECONDS
 for attempt in $(seq 1 60); do

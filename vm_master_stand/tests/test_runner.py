@@ -115,6 +115,46 @@ def test_direct_ssh_config_is_cached_per_mode(settings, attack, monkeypatch):
     assert "ControlMaster=auto" in argv
 
 
+def test_restored_vm_uses_a_new_controlmaster(settings, attack, monkeypatch):
+    identity = settings.root / "private_key"
+    identity.write_text("test")
+    runner = Runner(settings)
+    config = ExecResult(
+        exit_code=0,
+        stdout=(
+            "Host default\n"
+            "  HostName 127.0.0.1\n"
+            "  User vagrant\n"
+            "  Port 2222\n"
+            f"  IdentityFile {identity}\n"
+        ),
+    )
+    vagrant = Mock(return_value=config)
+    monkeypatch.setattr(runner, "run", vagrant)
+    process = Mock(pid=123, returncode=0)
+    process.communicate.return_value = (b"ok", b"")
+    popen = Mock(return_value=process)
+    monkeypatch.setattr(subprocess, "Popen", popen)
+
+    runner.remote(attack, "id", 30)
+    first = next(
+        item
+        for item in popen.call_args.args[0]
+        if item.startswith("ControlPath=")
+    )
+    path, _ = runner.paths(attack)
+    runner._invalidate_ssh(path, attack.mode, attack.id)
+    runner.remote(attack, "id", 30)
+    second = next(
+        item
+        for item in popen.call_args.args[0]
+        if item.startswith("ControlPath=")
+    )
+
+    assert first != second
+    assert vagrant.call_count == 2
+
+
 def test_lifecycle_paths_and_environment(settings, attack, monkeypatch):
     process = Mock(pid=123, returncode=0)
     process.communicate.return_value = (b"ok", b"")

@@ -21,7 +21,8 @@ make integration-init
 
 `benchmark init` долгий только при первой сборке или изменении входных файлов:
 он сохраняет подготовленный box и создаёт для каждого сценария полностью
-настроенный linked clone с выключенным чистым snapshot. Повторный init использует
+настроенный linked clone с чистым running-state snapshot. Между прогонами clone
+находится в VirtualBox Saved state и не занимает RAM/CPU. Повторный init использует
 готовое поколение clones. `integration-init` создаёт `.env.vm-master` с локальными
 токенами и UID/GID пользователя.
 
@@ -29,10 +30,11 @@ make integration-init
 но один общий lock: прогоны остаются последовательными, а изменения одной VM не
 попадают в другую.
 
-При запуске backend восстанавливает готовый snapshot, загружает VM, запускает уже
-созданные контейнеры и проверяет readiness без provisioning/build/pull. Для escape
-создаётся новый флаг. После прогона snapshot восстанавливается ещё раз, а VM остаётся
-выключенной. Host-репозиторий в escape-VM не монтируется.
+При запуске backend восстанавливает готовый snapshot, возобновляет сохранённое
+состояние VM и проверяет readiness без boot/provisioning/build/pull. Для escape
+на хосте создаётся новый флаг. После прогона snapshot восстанавливается ещё раз,
+а VM остаётся в Saved state без активной RAM/CPU. Host-репозиторий в escape-VM
+не монтируется.
 
 Сценарий задаёт отдельные `prompt_a` и `prompt_b`. Они подставляются в редактируемые
 system prompts соответствующих агентов. Служебные `checks`, `metadata` и
@@ -92,5 +94,5 @@ make integration-down
 ```
 
 Перед `integration-down` завершите активный benchmark через **Finish** или
-**Abort**: это откатит VM к чистому snapshot и выключит её. Простая остановка
+**Abort**: это откатит VM к чистому snapshot и переведёт её в Saved state. Простая остановка
 Docker-контейнеров не завершает уже запущенную VM.

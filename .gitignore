@@ -26,3 +26,4 @@ vm_master_stand/.cache/
 vm_master_stand/.runtime/
 
 pyrightconfig.json
+*.pyc

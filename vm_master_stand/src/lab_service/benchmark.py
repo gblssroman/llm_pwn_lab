@@ -346,7 +346,7 @@ def _scenario_snapshot_available(
 def prepare_scenario_snapshot(
     root, attack, box_name, version, generation, snapshot=SNAPSHOT_NAME
 ):
-    """Полностью готовит linked clone сценария и сохраняет его выключенным."""
+    """Готовит clone и сохраняет чистое состояние работающей VM на диске."""
     environment = _scenario_environment(
         root, attack, box_name, version, generation
     )
@@ -371,8 +371,12 @@ def prepare_scenario_snapshot(
         f"sudo docker compose -f {compose} ps --status running --services "
         "| grep -qx sandbox",
     )
-    _runtime_vagrant(root, environment, "halt")
+    # Saving a running VirtualBox VM includes RAM/CPU/device state. Restoring it
+    # without start releases host RAM while preserving a fast resume point.
     _runtime_vagrant(root, environment, "snapshot", "save", "-f", snapshot)
+    _runtime_vagrant(
+        root, environment, "snapshot", "restore", snapshot, "--no-start"
+    )
 
 
 def init_benchmark(
@@ -383,7 +387,7 @@ def init_benchmark(
     output=None,
     force=False,
 ):
-    """Готовит box и выключенный linked clone для каждого сценария.
+    """Готовит box и linked clone в Saved state для каждого сценария.
 
     Сначала сравниваем рецепт с предыдущей успешной сборкой. Если совпадают
     файлы и параметры, а box всё ещё зарегистрирован, дорогая сборка не нужна.

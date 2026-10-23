@@ -37,6 +37,9 @@ def test_escape_up_restores_snapshot_and_stops_on_failed_restore(monkeypatch, fa
         return ExecResult(exit_code=0)
 
     monkeypatch.setattr(runner, "run", run)
+    monkeypatch.setattr(
+        "lab_service.runner.secrets.token_hex", lambda size: "a" * (size * 2)
+    )
     remote = Mock(return_value=ExecResult(exit_code=0))
     monkeypatch.setattr(runner, "remote", remote)
     result = runner.up(Scenarios(ROOT, "escapes").load("docker-socket"))
@@ -48,6 +51,10 @@ def test_escape_up_restores_snapshot_and_stops_on_failed_restore(monkeypatch, fa
         assert len(calls) == 1
         assert "prepared VM restore + activation:" in result.stdout
         assert "LAB_ESCAPE_PROFILE=docker-socket" in remote.call_args.args[1]
+        assert (
+            "LAB_ESCAPE_FLAG='flag{" + "a" * 40 + "}'"
+            in remote.call_args.args[1]
+        )
 
 
 def test_escape_down_restores_snapshot_without_start(monkeypatch):
@@ -118,6 +125,12 @@ def test_prepared_image_reuse_and_invalidation(tmp_path):
         len({rows[0].split()[0] for rows in (hit, changed_source, changed_version)})
         == 3
     )
+
+
+def test_escape_activation_requires_host_generated_flag():
+    script = (ROOT / "vm/escape/activate.sh").read_text()
+    assert "LAB_ESCAPE_FLAG:?" in script
+    assert "openssl rand" not in script
 
 
 def builder_module():
@@ -252,7 +265,7 @@ def test_init_reuses_registered_box_and_rebuilds_changed_inputs(monkeypatch, tmp
     assert module.selected_box(root) == "lab/new"
 
 
-def test_scenario_snapshot_is_linked_isolated_and_powered_off(monkeypatch, tmp_path):
+def test_scenario_snapshot_is_linked_isolated_and_saved(monkeypatch, tmp_path):
     module = builder_module()
     root = init_root(tmp_path)
     calls = []
@@ -279,8 +292,8 @@ def test_scenario_snapshot_is_linked_isolated_and_powered_off(monkeypatch, tmp_p
                 "--services | grep -qx sandbox"
             ),
         ],
-        ["halt"],
         ["snapshot", "save", "-f", "clean"],
+        ["snapshot", "restore", "clean", "--no-start"],
     ]
     environment = calls[0][1]
     assert environment["LAB_ISOLATED_ESCAPE"] == "1"

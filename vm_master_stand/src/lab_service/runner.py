@@ -3,6 +3,7 @@ import hashlib
 import ipaddress
 import os
 import re
+import secrets
 import shlex
 import shutil
 import signal
@@ -49,6 +50,9 @@ class Runner:
         self.settings = settings
         self._ssh_guard = threading.Lock()
         self._ssh_targets = {}
+        self._ssh_generations = {}
+        # Never attach to a ControlMaster left by an older host-runner process.
+        self._ssh_control_nonce = secrets.token_hex(8)
 
     def paths(self, attack):
         """Проверяет и возвращает пути к Vagrantfile и provisioning-скрипту сценария."""
@@ -157,8 +161,12 @@ class Runner:
 
     def _invalidate_ssh(self, path, mode, attack_id):
         """Забывает endpoint после любого изменения состояния VM."""
+        key = (str(path), mode, attack_id)
         with self._ssh_guard:
-            self._ssh_targets.pop((str(path), mode, attack_id), None)
+            self._ssh_targets.pop(key, None)
+            # A restored RAM snapshot also rewinds sshd's TCP state. A new
+            # ControlPath prevents reuse of a master connection from that state.
+            self._ssh_generations[key] = self._ssh_generations.get(key, 0) + 1
 
     def _ssh_target(self, attack):
         """Один раз читает `vagrant ssh-config` и проверяет локальный endpoint."""
@@ -223,7 +231,14 @@ class Runner:
         if not isinstance(command, str) or not 0 < len(command) <= 200000:
             raise ValueError("Invalid remote command")
         hostname, port, user, identities = self._ssh_target(attack)
-        control_scope = f"{self.settings.root}\n{attack.mode}\n{attack.id}"
+        path, _ = self.paths(attack)
+        control_key = (str(path), attack.mode, attack.id)
+        with self._ssh_guard:
+            control_generation = self._ssh_generations.get(control_key, 0)
+        control_scope = (
+            f"{self.settings.root}\n{attack.mode}\n{attack.id}\n"
+            f"{self._ssh_control_nonce}\n{control_generation}"
+        )
         root_hash = hashlib.sha256(control_scope.encode()).hexdigest()[:12]
         control_directory = Path(f"/tmp/agentic-lab-{os.getuid()}/{root_hash}")
         control_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -277,9 +292,14 @@ class Runner:
             if result.exit_code or result.timed_out:
                 return result
             if attack.mode == "escape":
+                # Entropy inside a RAM snapshot is rewound too. Generate the
+                # per-run challenge on the host, after the clean restore.
+                flag = f"flag{{{secrets.token_hex(20)}}}"
                 command = (
                     "sudo env LAB_ESCAPE_PROFILE="
                     + shlex.quote(attack.profile)
+                    + " LAB_ESCAPE_FLAG="
+                    + shlex.quote(flag)
                     + " LAB_GUEST_WORKSPACE=/opt/agentic-lab "
                     "bash /opt/agentic-lab/vm/escape/activate.sh"
                 )
@@ -296,7 +316,7 @@ class Runner:
             return result
 
     def down(self, attack):
-        """Откатывает clone сценария к чистому snapshot и оставляет выключенным."""
+        """Откатывает clone к чистому snapshot и оставляет в Saved state."""
         with self.transaction(attack):
             return self.run(
                 attack,
