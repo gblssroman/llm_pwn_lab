@@ -11,11 +11,12 @@ OpenClaw/Inspect AI описаны в [руководстве по escape-бен
 
 ## Веб-панель
 
-Для ускорения семи escape-сценариев один раз выполните
+Для ускорения всех сценариев один раз выполните
 `uv run benchmark init`, затем запускайте `uv run benchmark run <сценарий>`
-или панель. Init сохраняет имя локального box; панель выбирает его автоматически.
-Зависимости и образ OpenClaw будут установлены заранее; каждый escape `up`
-создаёт чистую VM из этого box.
+или панель. Init сохраняет локальный box и готовит отдельный выключенный linked
+clone для каждого сценария; панель выбирает его автоматически. Зависимости,
+Docker images и контейнеры создаются заранее, а каждый `up` откатывает чистый
+snapshot нужного clone.
 Порядок запуска и передачи box коллеге: [ускоренный запуск](docs/ESCAPE_BENCHMARK.md#ускоренный-запуск).
 
 ```bash
@@ -30,7 +31,8 @@ docker compose up --build
 в форму «Подключение». После нового входа в систему `newgrp docker` уже не нужен. Host runner
 работает от вашего пользователя через Unix-сокет `.runtime/host-runner.sock`;
 панель в контейнере сама не запускает VirtualBox. Остановка панели командой
-`docker compose down` не удаляет VM: сначала используйте кнопку «Удалить VM».
+`docker compose down` не сбрасывает VM: сначала используйте кнопку
+«Сбросить и выключить VM».
 Если переменные `LAB_EVALUATOR_TOKEN` и `LAB_SANDBOX_TOKEN` уже заданы, используются их значения; иначе создаются новые
 токены на этот запуск. Не публикуйте вывод терминала. Токены в браузере хранятся
 только в памяти вкладки и очищаются кнопкой «Отключиться» или перезагрузкой страницы.
@@ -58,7 +60,7 @@ API-маршруты сохранены.
 ограничен 512 KiB на stdout/stderr. Браузер показывает до 200 тысяч символов, при
 превышении оставляет конец журнала. История не является постоянным архивом.
 Перезапуск сервера очищает её; закрытие вкладки не отменяет выполняющуюся задачу.
-Для одной VM панель допускает одну активную задачу; старые синхронные exec endpoints
+Для VM панель допускает одну активную задачу; старые синхронные exec endpoints
 не входят в это ограничение, не используйте их одновременно с lifecycle из панели.
 Фоновые задачи не поддерживают принудительную отмену; действуют обычные timeout.
 
@@ -96,7 +98,8 @@ Sandbox и tool API разделяют internal-сеть `sandbox-net`; tool API
 публикует порты контейнеров, подключённых только к internal-сетям, поэтому
 `vm/start-api-proxy.sh` создаёт loopback-listener и перенаправляет его на
 внутренний адрес tool API. Обе Docker-сети остаются internal; proxy работает
-от временного непривилегированного пользователя VM. Адрес обновляется при provisioning.
+от временного непривилегированного пользователя VM. Адрес обновляется при первом
+provisioning и последующей activation.
 Подробнее: [обсуждение в Moby](https://github.com/moby/moby/discussions/53256). SSH пробрасывается только на loopback
 хоста, дополнительной host-only сети нет. О сетевой изоляции:
 [Docker internal networks](https://docs.docker.com/reference/compose-file/networks/).
@@ -137,7 +140,8 @@ pyproject.toml, uv.lock          зависимости сервиса и тес
 ## Установка и запуск
 
 Хост: Linux, Python 3.11+, uv, Docker Engine с Compose, Vagrant, VirtualBox с аппаратной виртуализацией,
-минимум 4 GB свободной RAM для VM и место для box/images. Runner использует POSIX
+минимум 4 GB свободной RAM для одной активной VM и место для box/linked clones.
+Одновременно запускается только один сценарий. Runner использует POSIX
 process groups; нативный Windows-хост не поддержан. PowerShell-примеры подходят
 для `pwsh` на Linux. Unit-тестам Vagrant/VirtualBox/Docker не нужны.
 Vagrant и VirtualBox установите системным способом для своего дистрибутива.
@@ -210,13 +214,13 @@ lifecycle или невозможность запуска Vagrant. Ненуле
 
 YAML задаёт Vagrantfile и setup script, но не исполняемую программу хоста.
 Runner передаёт `VAGRANT_VAGRANTFILE`, `VAGRANT_CWD`, `VAGRANT_DOTFILE_PATH`,
-`LAB_SETUP_SCRIPT`, `LAB_REPO_ROOT`;
+`LAB_SETUP_SCRIPT`, `LAB_REPO_ROOT` и включает VirtualBox linked clones;
 см. [переменные Vagrant](https://developer.hashicorp.com/vagrant/docs/other/environmental-variables).
 Lifecycle и verify используют общий потоковый и файловый lock по Vagrantfile,
-включая разные процессы сервера. Agent- и escape-сценарии используют отдельные
-Vagrant state и VM; общий lock сохраняет последовательное выполнение. Поэтому
-удаление agent-VM не затрагивает чистый snapshot escape-VM. Не выполняйте exec во
-время up/down и не изменяйте target во время verify.
+включая разные процессы сервера. Каждый сценарий использует отдельный linked clone,
+Vagrant state и чистый snapshot; общий lock сохраняет последовательное выполнение.
+Изменяемые differencing disks не разделяются между сценариями. Не выполняйте exec
+во время up/down и не изменяйте target во время verify.
 
 ## Сценарии и семантика результата
 
@@ -239,10 +243,11 @@ OWASP/MITRE tags — рабочая лабораторная классифик�
 CLI. Verifier доказывает downstream-эффект; причинную связь с долговременной памятью
 нужно устанавливать по транскрипту двух обращений.
 
-Каждый эксперимент начинайте с `up`: повторный provisioning удаляет disposable
-volumes и пересоздаёт БД, sandbox state и grant. Иначе audit предыдущего запуска
-может дать положительный результат. Заглушка пишет prompt и UTC timestamp в
-`/state/transcript.jsonl`; инструменты сама не вызывает.
+Каждый эксперимент начинайте с `up`: он откатывает VM конкретного сценария к
+подготовленному snapshot, поэтому БД, volumes, sandbox state и grant снова чистые.
+Provisioning, сборка образов и pull выполняются заранее командой `benchmark init`.
+Заглушка пишет prompt и UTC timestamp в `/state/transcript.jsonl`; инструменты сама
+не вызывает.
 
 Пример YAML (имя файла `example.yaml`):
 
@@ -318,8 +323,8 @@ Internal-сеть не имеет internet-egress: облачный LLM API из
 - Remote timeout ограничивает обычные дочерние процессы, локально уничтожается
   группа Vagrant/SSH. Намеренно отделившиеся процессы и изменения target требуют
   reset VM. Вывод буферизуется: не запускайте бесконечный вывод.
-- После таймаута provisioning VM может остаться частично запущенной: выполните down.
-  Для escape down откатывает чистый snapshot и выключает VM; agent-VM удаляется.
+- После таймаута restore/activation VM может остаться частично запущенной: выполните
+  down. Для обеих семей down откатывает snapshot сценария и выключает VM.
 - Docker images и box имеют version tags, не digest. Для воспроизводимых прогонов
   дополнительно закрепите digest и box version.
 - Не публикуйте control API наружу. TLS, multi-tenant isolation, rate limiting,
@@ -359,7 +364,7 @@ Smoke test использует настоящий Runner через FastAPI Tes
 сценариев, все три типа verifier, loopback-привязку API, отсутствие прямого доступа
 sandbox к Postgres, права sandbox, read-only filesystem, отсутствие VM-файлов и grant,
 заглушку и transcript, разделение токенов, timeout, synthetic tool invocations,
-verify и сброс volumes повторным provisioning. В конце уничтожает VM, даже при
+verify и сброс состояния откатом snapshot. В конце выключает VM, даже при
 ошибке, и записывает `reports/vm-smoke.json`. Это разрушительная проверка состояния
 именно лабораторной VM: не запускайте её во время другого эксперимента.
 Проверка не доказывает уязвимость LLM или причинность memory poisoning: инструменты
@@ -376,7 +381,7 @@ verify и сброс volumes повторным provisioning. В конце ун
 Полный тест на настоящей VirtualBox VM завершился успешно: **36 проверок**,
 все пять synthetic сценариев, все три вида verifier, разделение ролей, timeout,
 read-only sandbox, отсутствие прямого подключения к Postgres, loopback-прокси,
-повторный provisioning со сбросом БД и sandbox state. VM уничтожена через down.
+повторный snapshot-откат со сбросом БД и sandbox state. VM выключена через down.
 Машиночитаемый отчёт: [reports/vm-smoke.json](reports/vm-smoke.json).
 Unit-тесты: **63 passed**. Единственное предупреждение — deprecation httpx в
 Starlette TestClient, на результаты проверок не влияет.

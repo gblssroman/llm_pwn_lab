@@ -1,6 +1,7 @@
+import json
+import shutil
 from contextlib import nullcontext
 from pathlib import Path
-import shutil
 
 import pytest
 from fastapi.testclient import TestClient
@@ -45,6 +46,23 @@ def settings(tmp_path):
         target = tmp_path / name
         target.parent.mkdir(exist_ok=True)
         shutil.copyfile(ROOT / name, target)
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    (runtime / "benchmark.json").write_text(
+        json.dumps(
+            {
+                "box": "lab/prepared",
+                "openclaw_version": "2026.9.6",
+                "snapshot": "agentic-lab-clean",
+                "generation": "20261023-000000-000000",
+                "scenarios": {
+                    "agent:context-poisoning": "agentic-lab-clean",
+                    "escape:context-poisoning": "agentic-lab-clean",
+                    "escape:docker-socket": "agentic-lab-clean",
+                },
+            }
+        )
+    )
     return Settings(root=tmp_path, sandbox_token="s" * 32, evaluator_token="e" * 32)
 
 

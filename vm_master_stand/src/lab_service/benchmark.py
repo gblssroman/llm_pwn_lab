@@ -1,9 +1,10 @@
-"""Prepare a reusable VirtualBox box in a separate VM, without running attacks."""
+"""Prepare a reusable VirtualBox box and isolated per-scenario linked clones."""
 
 import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -23,7 +24,11 @@ SNAPSHOT_NAME = "agentic-lab-clean"
 # Изменение любого из этих файлов требует новой подготовки VM-образа.
 BOX_INPUTS = (
     "vagrant/Vagrantfile",
+    "vm/activate.sh",
+    "vm/setup.sh",
+    "vm/start-api-proxy.sh",
     "vm/escape/common.sh",
+    "vm/escape/activate.sh",
     "vm/escape/prepare-box.sh",
     "vm/escape/setup.sh",
     "vm/escape/Dockerfile",
@@ -36,15 +41,74 @@ BOX_INPUTS = (
     "vm/escape/profiles/sys-admin.yml",
     "vm/escape/profiles/sys-module.yml",
     "vm/agent-compose.yml",
+    "vm/openclaw-adapter/Dockerfile",
     "vm/openclaw-adapter/adapter.py",
+    "vm/openclaw-adapter/lab_tool.py",
+    "vm/postgres-init.sql",
+    "vm/target-api/Dockerfile",
+    "vm/target-api/app.py",
+    "vm/target-api/requirements.txt",
 )
 
 
-def vagrant_dotfile_path(root, mode):
-    """Возвращает отдельный Vagrant state для каждой семьи сценариев."""
+def vagrant_dotfile_path(root, mode, scenario_id=None, generation=None):
+    """Возвращает изолированный Vagrant state семьи или конкретного сценария."""
     if mode not in {"agent", "escape"}:
         raise ValueError("Unknown benchmark mode")
-    return root / ".runtime" / "vagrant" / mode
+    if scenario_id is None:
+        return root / ".runtime" / "vagrant" / mode
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", scenario_id):
+        raise ValueError("Invalid scenario ID")
+    if generation is None:
+        generation = _benchmark_generation(root)
+    if not isinstance(generation, str) or not re.fullmatch(
+        r"[0-9]{8}-[0-9]{6}-[0-9]{6}", generation
+    ):
+        raise RuntimeError("Invalid benchmark generation; run benchmark init again")
+    return root / ".runtime" / "vagrant" / "scenarios" / generation / mode / scenario_id
+
+
+def scenario_key(attack):
+    """Даёт стабильный ключ scenario snapshot в benchmark state."""
+    return f"{attack.mode}:{attack.id}"
+
+
+def _benchmark_generation(root):
+    """Читает опубликованное поколение подготовленных linked clones."""
+    try:
+        data = json.loads((root / ".runtime/benchmark.json").read_text())
+        generation = data["generation"]
+        scenarios = data["scenarios"]
+        if not isinstance(scenarios, dict):
+            raise TypeError("Invalid scenarios")
+        return generation
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise RuntimeError(
+            "Prepared scenario VMs are missing; run benchmark init again"
+        ) from exc
+
+
+def scenario_vagrant_path(root, attack, generation=None):
+    """Возвращает metadata path linked clone выбранного сценария."""
+    return vagrant_dotfile_path(root, attack.mode, attack.id, generation)
+
+
+def scenario_snapshot(root, attack):
+    """Возвращает snapshot только для опубликованного подготовленного сценария."""
+    state = root / ".runtime/benchmark.json"
+    try:
+        data = json.loads(state.read_text())
+        _ = vagrant_dotfile_path(
+            root, attack.mode, attack.id, data["generation"]
+        )
+        snapshot = data["scenarios"][scenario_key(attack)]
+        if not isinstance(snapshot, str) or not valid_snapshot_name(snapshot):
+            raise ValueError("Invalid snapshot name")
+        return snapshot
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise RuntimeError(
+            f"Prepared VM for {attack.id} is missing; run benchmark init again"
+        ) from exc
 
 
 def build_box(base_box, name, output, version, root=None):
@@ -121,7 +185,7 @@ def build_box(base_box, name, output, version, root=None):
 
 
 def escape_config(root, box_override=None, version_override=None):
-    """Возвращает пару (box, версия OpenClaw) для escape-прогона.
+    """Возвращает пару (box, версия OpenClaw) для benchmark-прогона.
 
     Читаем один JSON-снимок, чтобы не смешать имя от старой настройки с версией
     от новой. Явные environment overrides имеют приоритет; до init доступны
@@ -142,21 +206,6 @@ def escape_config(root, box_override=None, version_override=None):
         return box, version
     except (ValueError, KeyError, TypeError, AttributeError) as exc:
         raise RuntimeError("Invalid benchmark state; run benchmark init again") from exc
-
-
-def escape_snapshot(root):
-    """Возвращает имя проверенного чистого snapshot для escape-прогонов."""
-    state = root / ".runtime/benchmark.json"
-    try:
-        data = json.loads(state.read_text())
-        snapshot = data["snapshot"]
-        if not isinstance(snapshot, str) or not valid_snapshot_name(snapshot):
-            raise ValueError("Invalid snapshot name")
-        return snapshot
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        raise RuntimeError(
-            "Clean VM snapshot is missing; run benchmark init again"
-        ) from exc
 
 
 def valid_snapshot_name(value):
@@ -230,22 +279,25 @@ def _save_state(state_path, data):
     os.replace(temporary_path, state_path)
 
 
-def _runtime_environment(root, box_name, version):
-    """Строит окружение единственной изолированной benchmark VM."""
+def _scenario_environment(root, attack, box_name, version, generation):
+    """Строит окружение отдельного linked clone конкретного сценария."""
     environment = {
         key: value for key, value in os.environ.items() if not key.startswith("LAB_")
     }
     environment.update(
         VAGRANT_CWD=str(root / "vagrant"),
         VAGRANT_VAGRANTFILE="Vagrantfile",
-        VAGRANT_DOTFILE_PATH=str(vagrant_dotfile_path(root, "escape")),
+        VAGRANT_DOTFILE_PATH=str(
+            scenario_vagrant_path(root, attack, generation)
+        ),
         LAB_REPO_ROOT=str(root),
-        LAB_SETUP_SCRIPT=str(root / "vm/escape/setup.sh"),
+        LAB_SETUP_SCRIPT=str(root / attack.setup_script),
         LAB_VAGRANT_BOX=box_name,
         LAB_OPENCLAW_VERSION=version,
         LAB_OPENCLAW_COMMAND="",
-        LAB_ESCAPE_PROFILE="",
-        LAB_ISOLATED_ESCAPE="1",
+        LAB_ESCAPE_PROFILE=attack.profile if attack.mode == "escape" else "",
+        LAB_ISOLATED_ESCAPE="1" if attack.mode == "escape" else "0",
+        LAB_LINKED_CLONE="1",
     )
     return environment
 
@@ -268,12 +320,16 @@ def _runtime_vagrant(root, environment, *args, capture=False):
         print(f"[vm] {args[0]}: {time.monotonic() - started:.1f}s", flush=True)
 
 
-def _snapshot_available(root, box_name, version, snapshot):
-    """Проверяет, что runtime VM существует и содержит нужный snapshot."""
+def _scenario_snapshot_available(
+    root, attack, box_name, version, generation, snapshot
+):
+    """Проверяет linked clone сценария и наличие его чистого snapshot."""
     if not isinstance(snapshot, str) or not valid_snapshot_name(snapshot):
         return False
-    environment = _runtime_environment(root, box_name, version)
     try:
+        environment = _scenario_environment(
+            root, attack, box_name, version, generation
+        )
         status = _runtime_vagrant(
             root, environment, "status", "--machine-readable", capture=True
         )
@@ -283,28 +339,39 @@ def _snapshot_available(root, box_name, version, snapshot):
             root, environment, "snapshot", "list", capture=True
         )
         return snapshot in {line.strip() for line in snapshots.stdout.splitlines()}
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
         return False
 
 
-def prepare_runtime_snapshot(root, box_name, version, snapshot=SNAPSHOT_NAME):
-    """Импортирует box один раз и фиксирует выключенное чистое состояние VM.
-
-    Host-репозиторий в эту VM не монтируется. В snapshot ещё нет сценария, флага,
-    контейнеров запуска или модельных credentials — только подготовленный образ и
-    неизменяемые runtime-файлы внутри гостевого диска.
-    """
-    environment = _runtime_environment(root, box_name, version)
+def prepare_scenario_snapshot(
+    root, attack, box_name, version, generation, snapshot=SNAPSHOT_NAME
+):
+    """Полностью готовит linked clone сценария и сохраняет его выключенным."""
+    environment = _scenario_environment(
+        root, attack, box_name, version, generation
+    )
+    dotfile = Path(environment["VAGRANT_DOTFILE_PATH"])
+    dotfile.mkdir(mode=0o700, parents=True, exist_ok=True)
+    dotfile.chmod(0o700)
+    print(f"[scenario] preparing {attack.mode}:{attack.id}", flush=True)
     _runtime_vagrant(root, environment, "destroy", "-f")
-    _runtime_vagrant(root, environment, "up", "--provider=virtualbox", "--no-provision")
+    _runtime_vagrant(root, environment, "up", "--provider=virtualbox", "--provision")
+    workspace = "/opt/agentic-lab" if attack.mode == "escape" else "/workspace"
+    compose = (
+        "vm/escape/compose.yml"
+        if attack.mode == "escape"
+        else "vm/agent-compose.yml"
+    )
     _runtime_vagrant(
         root,
         environment,
         "ssh",
         "-c",
-        "test -d /opt/agentic-lab/vm/escape && sudo docker info >/dev/null",
+        f"cd {workspace} && sudo docker info >/dev/null && "
+        f"sudo docker compose -f {compose} ps --status running --services "
+        "| grep -qx sandbox",
     )
-    _runtime_vagrant(root, environment, "halt", "-f")
+    _runtime_vagrant(root, environment, "halt")
     _runtime_vagrant(root, environment, "snapshot", "save", "-f", snapshot)
 
 
@@ -316,48 +383,80 @@ def init_benchmark(
     output=None,
     force=False,
 ):
-    """Готовит box один раз и возвращает сохранённые настройки бенчмарка.
+    """Готовит box и выключенный linked clone для каждого сценария.
 
     Сначала сравниваем рецепт с предыдущей успешной сборкой. Если совпадают
     файлы и параметры, а box всё ещё зарегистрирован, дорогая сборка не нужна.
     force явно отключает это повторное использование.
 
-    Файловая блокировка не позволяет двум init одновременно готовить один кеш.
-    Новые настройки публикуются только после успешной сборки и регистрации:
-    ошибка не лишает пользователя предыдущего рабочего box. Здесь не создаются
-    флаг эксперимента, модельные сессии или учётные данные провайдера.
+    Файловые блокировки исключают параллельный init и запуск сценария. Новое
+    поколение clones публикуется только после успешной подготовки всех VM: при
+    ошибке runner продолжит видеть прошлое поколение. Связанные диски разделяют
+    только неизменяемый base; состояние каждого сценария и snapshot независимы.
     """
+    from .scenarios import Scenarios
+
     root = root.resolve()
     fingerprint = _box_fingerprint(root, base_box, version)
+    scenarios = [*Scenarios(root).all(), *Scenarios(root, "escapes").all()]
+    expected_scenarios = {scenario_key(item): SNAPSHOT_NAME for item in scenarios}
     locks_directory = root / ".locks"
     locks_directory.mkdir(exist_ok=True)
     state_path = root / ".runtime/benchmark.json"
+    vagrantfile = (root / "vagrant/Vagrantfile").resolve()
+    lifecycle_lock = hashlib.sha256(str(vagrantfile).encode()).hexdigest()
 
-    with FileLock(locks_directory / "benchmark-init.lock", timeout=PREPARATION_TIMEOUT):
+    with (
+        FileLock(locks_directory / "benchmark-init.lock", timeout=PREPARATION_TIMEOUT),
+        FileLock(
+            locks_directory / f"{lifecycle_lock}.lock", timeout=PREPARATION_TIMEOUT
+        ),
+    ):
         previous = _read_previous_state(state_path)
         reuse_box = not force and _can_reuse_box(previous, fingerprint, name, output)
+        stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S-%f")
         if reuse_box:
             box_name = previous["box"]
             box_file = Path(previous["box_file"])
         else:
             # Уникальное имя сохраняет прошлую регистрацию, пока новая не готова.
-            stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S-%f")
             box_name = name or f"agentic-lab/escape-{stamp}"
             box_file = output or root / ".cache/escape-boxes" / f"escape-{stamp}.box"
             box_file = box_file.resolve()
             build_box(base_box, box_name, box_file, version, root=root)
 
         snapshot = SNAPSHOT_NAME
-        if reuse_box and _snapshot_available(
-            root, box_name, version, previous.get("snapshot", "")
-        ):
+        previous_generation = previous.get("generation")
+        reuse_scenarios = (
+            reuse_box
+            and previous.get("scenarios") == expected_scenarios
+            and isinstance(previous_generation, str)
+            and all(
+                _scenario_snapshot_available(
+                    root,
+                    scenario,
+                    box_name,
+                    version,
+                    previous_generation,
+                    snapshot,
+                )
+                for scenario in scenarios
+            )
+        )
+        if reuse_scenarios:
             print(f"Benchmark already initialized: {box_name}", flush=True)
             return previous
 
-        prepare_runtime_snapshot(root, box_name, version, snapshot)
+        generation = stamp
+        for scenario in scenarios:
+            prepare_scenario_snapshot(
+                root, scenario, box_name, version, generation, snapshot
+            )
         state = {
             "box": box_name,
             "snapshot": snapshot,
+            "generation": generation,
+            "scenarios": expected_scenarios,
             "fingerprint": fingerprint,
             "openclaw_version": version,
             "base_box": base_box,
@@ -365,7 +464,11 @@ def init_benchmark(
         }
         _save_state(state_path, state)
 
-    print("Benchmark initialized. Run: uv run benchmark run docker-socket", flush=True)
+    print(
+        "Benchmark initialized with per-scenario linked clones. "
+        "Run: uv run benchmark run docker-socket",
+        flush=True,
+    )
     return state
 
 
@@ -377,7 +480,7 @@ def _make_parser():
     commands = parser.add_subparsers(dest="action", required=True)
 
     initialize = commands.add_parser(
-        "init", help="Prepare dependencies and a reusable clean VM box once"
+        "init", help="Prepare the box and clean linked clone for every scenario"
     )
     initialize.add_argument("--base-box", default=DEFAULT_BOX)
     initialize.add_argument("--name")

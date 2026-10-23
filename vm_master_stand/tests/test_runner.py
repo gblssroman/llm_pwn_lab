@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock
 
 import pytest
+
 from lab_service.models import ExecRequest, ExecResult
 from lab_service.runner import Runner, encoded_shell
 from lab_service.scenarios import Scenarios
@@ -60,6 +61,7 @@ def test_sandbox_wrapper(settings, attack, monkeypatch):
 
 def test_escape_sandbox_uses_guest_copy(monkeypatch):
     from conftest import ROOT
+
     from lab_service.config import Settings
 
     settings = Settings(root=ROOT, sandbox_token="s" * 32, evaluator_token="e" * 32)
@@ -120,17 +122,28 @@ def test_lifecycle_paths_and_environment(settings, attack, monkeypatch):
     monkeypatch.setattr(subprocess, "Popen", popen)
     monkeypatch.setenv("LAB_EVALUATOR_TOKEN", "do-not-forward")
     runner = Runner(settings)
+    remote = Mock(return_value=ExecResult(exit_code=0))
+    monkeypatch.setattr(runner, "remote", remote)
     runner.up(attack)
     kwargs = popen.call_args.kwargs
     assert kwargs["env"]["VAGRANT_VAGRANTFILE"] == "Vagrantfile"
     assert kwargs["env"]["VAGRANT_DOTFILE_PATH"] == str(
-        settings.root / ".runtime/vagrant/agent"
+        settings.root
+        / ".runtime/vagrant/scenarios/20261023-000000-000000/agent/context-poisoning"
     )
     assert kwargs["cwd"] == settings.root / "vagrant"
     assert kwargs["env"]["LAB_SETUP_SCRIPT"] == str(settings.root / "vm/setup.sh")
+    assert kwargs["env"]["LAB_LINKED_CLONE"] == "1"
     assert "LAB_EVALUATOR_TOKEN" not in kwargs["env"]
+    assert remote.call_args.args[1] == "sudo bash /workspace/vm/activate.sh"
     runner.down(attack)
-    assert popen.call_args.args[0] == ["vagrant", "destroy", "-f"]
+    assert popen.call_args.args[0] == [
+        "vagrant",
+        "snapshot",
+        "restore",
+        "agentic-lab-clean",
+        "--no-start",
+    ]
 
 
 def test_agent_and_escape_use_separate_vagrant_state(settings, attack, monkeypatch):
@@ -152,8 +165,9 @@ def test_agent_and_escape_use_separate_vagrant_state(settings, attack, monkeypat
     runner.run(escape, ["status"], 30)
     escape_state = popen.call_args.kwargs["env"]["VAGRANT_DOTFILE_PATH"]
 
-    assert agent_state == str(settings.root / ".runtime/vagrant/agent")
-    assert escape_state == str(settings.root / ".runtime/vagrant/escape")
+    base = settings.root / ".runtime/vagrant/scenarios/20261023-000000-000000"
+    assert agent_state == str(base / "agent/context-poisoning")
+    assert escape_state == str(base / "escape/context-poisoning")
     assert agent_state != escape_state
 
 
@@ -181,7 +195,7 @@ def test_shared_lifecycle_lock(settings, attack, monkeypatch):
             "setup_script": "vm/escape/setup.sh",
         }
     )
-    monkeypatch.setattr("lab_service.runner.escape_snapshot", lambda _: "clean")
+    monkeypatch.setattr("lab_service.runner.scenario_snapshot", lambda *_: "clean")
     assert first.lock_for(attack) is second.lock_for(other)
     active, maximum = 0, 0
     guard = threading.Lock()
@@ -197,6 +211,7 @@ def test_shared_lifecycle_lock(settings, attack, monkeypatch):
         return ExecResult(exit_code=0)
 
     monkeypatch.setattr(first, "run", run)
+    monkeypatch.setattr(first, "remote", run)
     monkeypatch.setattr(second, "run", run)
     with ThreadPoolExecutor(2) as pool:
         futures = [pool.submit(first.up, attack), pool.submit(second.down, other)]

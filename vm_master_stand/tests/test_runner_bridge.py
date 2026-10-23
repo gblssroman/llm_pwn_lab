@@ -4,6 +4,7 @@ import socket
 import threading
 
 from conftest import ROOT
+
 from lab_service.jobs import log_sink
 from lab_service.models import ExecResult
 from lab_service.runner_bridge import BridgeRunner, make_server, valid_vagrant_args
@@ -15,9 +16,13 @@ def test_bridge_forwards_vagrant_operation_and_live_log(settings, attack):
 
     class Backend:
         def run(self, scenario, args, timeout, environment=None):
-            calls.append((scenario.id, args, timeout, environment))
+            calls.append(("run", scenario.id, args, timeout, environment))
             log_sink.get()("stdout", "VM ready\n")
             return ExecResult(exit_code=0, stdout="VM ready\n")
+
+        def remote(self, scenario, command, timeout):
+            calls.append(("remote", scenario.id, command, timeout))
+            return ExecResult(exit_code=0, stdout="activated\n")
 
     path = settings.root / ".runtime" / "host-runner.sock"
     server = make_server(settings.root, path, Backend())
@@ -27,12 +32,13 @@ def test_bridge_forwards_vagrant_operation_and_live_log(settings, attack):
     token = log_sink.set(lambda stream, value: events.append((stream, value)))
     try:
         result = BridgeRunner(settings, path).up(attack)
-        assert result.stdout == "VM ready\n"
-        assert events == [("stdout", "VM ready\n")]
-        assert calls[0][:2] == (
+        assert "prepared VM restore + activation" in result.stdout
+        assert ("stdout", "VM ready\n") in events
+        assert calls[0][1:3] == (
             "context-poisoning",
-            ["up", "--provider=virtualbox", "--provision"],
+            ["snapshot", "restore", "agentic-lab-clean"],
         )
+        assert calls[1][0:2] == ("remote", "context-poisoning")
     finally:
         log_sink.reset(token)
         server.shutdown()
@@ -42,6 +48,7 @@ def test_bridge_forwards_vagrant_operation_and_live_log(settings, attack):
 
 def test_bridge_rejects_unapproved_vagrant_args(settings):
     assert not valid_vagrant_args(["ssh", "-c", "id"])
+    assert not valid_vagrant_args(["up", "--provider=virtualbox", "--provision"])
     path = settings.root / ".runtime" / "host-runner.sock"
 
     class Backend:
@@ -89,6 +96,10 @@ def test_bridge_selects_initialized_escape_box_without_host_state(
             calls.append((args, environment))
             return ExecResult(exit_code=0)
 
+        def remote(self, scenario, command, timeout):
+            calls.append((command, None))
+            return ExecResult(exit_code=0)
+
     path = settings.root / ".runtime/host-runner.sock"
     server = make_server(settings.root, path, Backend())
     (path.parent / "benchmark.json").write_text(
@@ -97,6 +108,8 @@ def test_bridge_selects_initialized_escape_box_without_host_state(
                 "box": "lab/prepared",
                 "openclaw_version": "2026.9.7",
                 "snapshot": "agentic-lab-clean",
+                "generation": "20261023-000000-000000",
+                "scenarios": {"escape:docker-socket": "agentic-lab-clean"},
             }
         )
     )
@@ -109,10 +122,11 @@ def test_bridge_selects_initialized_escape_box_without_host_state(
             Scenarios(settings.root, "escapes").load("docker-socket")
         )
         assert result.exit_code == 0
-        assert [args[0] for args, _ in calls] == ["snapshot", "provision"]
-        for _, environment in calls:
-            assert environment["LAB_VAGRANT_BOX"] == "lab/prepared"
-            assert environment["LAB_OPENCLAW_VERSION"] == "2026.9.7"
+        assert calls[0][0] == ["snapshot", "restore", "agentic-lab-clean"]
+        assert calls[1][0].endswith("vm/escape/activate.sh")
+        environment = calls[0][1]
+        assert environment["LAB_VAGRANT_BOX"] == "lab/prepared"
+        assert environment["LAB_OPENCLAW_VERSION"] == "2026.9.7"
     finally:
         server.shutdown()
         server.server_close()

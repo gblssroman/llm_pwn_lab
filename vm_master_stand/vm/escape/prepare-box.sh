@@ -5,6 +5,8 @@ cd /workspace
 source vm/escape/common.sh
 lab_stage 'prepare all escape dependencies' lab_dependencies all
 lab_stage 'prepare escape image' lab_image
+lab_stage 'prepare agent images' docker compose -f vm/agent-compose.yml build sandbox tool-api
+lab_stage 'prepare postgres image' docker pull postgres:16-bookworm
 # Runtime escape VMs do not mount the host repository. Copy only the immutable
 # files needed for Compose/provisioning into the prepared guest disk.
 rm -rf /opt/agentic-lab

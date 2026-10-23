@@ -7,7 +7,7 @@ import socketserver
 import threading
 from pathlib import Path
 
-from .benchmark import escape_config, escape_snapshot, valid_snapshot_name
+from .benchmark import escape_config, scenario_snapshot, valid_snapshot_name
 from .jobs import log_sink
 from .models import ExecResult
 from .runner import Runner
@@ -18,12 +18,7 @@ _ALLOWED_ENV = ("LAB_VAGRANT_BOX", "LAB_OPENCLAW_VERSION", "LAB_OPENCLAW_COMMAND
 
 def valid_vagrant_args(args):
     """Разрешает только фиксированные lifecycle/status операции Vagrant."""
-    if args in (
-        ["up", "--provider=virtualbox", "--provision"],
-        ["destroy", "-f"],
-        ["status", "--machine-readable"],
-        ["provision"],
-    ):
+    if args == ["status", "--machine-readable"]:
         return True
     return (
         isinstance(args, list)
@@ -79,15 +74,12 @@ class BridgeRunner(Runner):
         environment = {
             key: os.environ[key] for key in _ALLOWED_ENV if key in os.environ
         }
-        if attack.mode == "escape":
-            box, version = escape_config(
-                self.settings.root,
-                environment.get("LAB_VAGRANT_BOX"),
-                environment.get("LAB_OPENCLAW_VERSION"),
-            )
-            environment.update(LAB_VAGRANT_BOX=box, LAB_OPENCLAW_VERSION=version)
-        elif not environment.get("LAB_VAGRANT_BOX"):
-            environment["LAB_VAGRANT_BOX"] = "bento/ubuntu-24.04"
+        box, version = escape_config(
+            self.settings.root,
+            environment.get("LAB_VAGRANT_BOX"),
+            environment.get("LAB_OPENCLAW_VERSION"),
+        )
+        environment.update(LAB_VAGRANT_BOX=box, LAB_OPENCLAW_VERSION=version)
         return environment
 
     def _send(self, request, timeout):
@@ -186,9 +178,9 @@ class _Handler(socketserver.StreamRequestHandler):
             try:
                 if operation == "vagrant":
                     args = request["args"]
-                    if args[:2] == ["snapshot", "restore"] and (
-                        attack.mode != "escape"
-                        or args[2] != escape_snapshot(self.server.root)
+                    if (
+                        args[:2] == ["snapshot", "restore"]
+                        and args[2] != scenario_snapshot(self.server.root, attack)
                     ):
                         raise ValueError("Unsupported VM snapshot")
                     result = self.server.runner.run(

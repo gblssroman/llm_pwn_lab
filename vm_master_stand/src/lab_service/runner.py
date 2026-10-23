@@ -14,7 +14,11 @@ from pathlib import Path
 
 from filelock import FileLock
 
-from .benchmark import escape_config, escape_snapshot, vagrant_dotfile_path
+from .benchmark import (
+    escape_config,
+    scenario_snapshot,
+    scenario_vagrant_path,
+)
 from .jobs import log_sink
 from .models import ExecResult
 from .scenarios import repo_path
@@ -35,7 +39,7 @@ def encoded_shell(command: str) -> str:
 
 
 class Runner:
-    """Управляет одной Vagrant VM и разделяет sandbox execution и evaluator execution."""
+    """Управляет linked clones сценариев и разделяет sandbox/evaluator execution."""
 
     _guard = threading.Lock()
     _locks = {}
@@ -92,27 +96,24 @@ class Runner:
         path, setup = self.paths(attack)
         env = os.environ.copy()
         env.update(environment or {})
-        # Agent cleanup destroys only the disposable agent VM; the escape VM and
-        # its clean snapshot live in a separate Vagrant state directory.
+        # Every scenario owns a distinct linked clone and clean snapshot.
         env["VAGRANT_DOTFILE_PATH"] = str(
-            vagrant_dotfile_path(self.settings.root, attack.mode)
+            scenario_vagrant_path(self.settings.root, attack)
         )
         # Vagrant/provisioning must never inherit control API credentials.
         env.pop("LAB_SANDBOX_TOKEN", None)
         env.pop("LAB_EVALUATOR_TOKEN", None)
-        if attack.mode == "escape":
-            box, version = escape_config(
-                self.settings.root,
-                env.get("LAB_VAGRANT_BOX"),
-                env.get("LAB_OPENCLAW_VERSION"),
-            )
-            env.update(
-                LAB_VAGRANT_BOX=box,
-                LAB_OPENCLAW_VERSION=version,
-                LAB_ISOLATED_ESCAPE="1",
-            )
-        elif not env.get("LAB_VAGRANT_BOX"):
-            env["LAB_VAGRANT_BOX"] = "bento/ubuntu-24.04"
+        box, version = escape_config(
+            self.settings.root,
+            env.get("LAB_VAGRANT_BOX"),
+            env.get("LAB_OPENCLAW_VERSION"),
+        )
+        env.update(
+            LAB_VAGRANT_BOX=box,
+            LAB_OPENCLAW_VERSION=version,
+            LAB_ISOLATED_ESCAPE="1" if attack.mode == "escape" else "0",
+            LAB_LINKED_CLONE="1",
+        )
         env.update(
             VAGRANT_CWD=str(path.parent),
             VAGRANT_VAGRANTFILE=path.name,
@@ -121,7 +122,7 @@ class Runner:
             LAB_ESCAPE_PROFILE=attack.profile if attack.mode == "escape" else "",
         )
         if args and args[0] in {"destroy", "halt", "reload", "snapshot", "up"}:
-            self._invalidate_ssh(path, attack.mode)
+            self._invalidate_ssh(path, attack.mode, attack.id)
         process = subprocess.Popen(
             ["vagrant", *args],
             cwd=path.parent,
@@ -154,15 +155,15 @@ class Runner:
             timed_out=timed_out,
         )
 
-    def _invalidate_ssh(self, path, mode):
+    def _invalidate_ssh(self, path, mode, attack_id):
         """Забывает endpoint после любого изменения состояния VM."""
         with self._ssh_guard:
-            self._ssh_targets.pop((str(path), mode), None)
+            self._ssh_targets.pop((str(path), mode, attack_id), None)
 
     def _ssh_target(self, attack):
         """Один раз читает `vagrant ssh-config` и проверяет локальный endpoint."""
         path, _ = self.paths(attack)
-        key = (str(path), attack.mode)
+        key = (str(path), attack.mode, attack.id)
         with self._ssh_guard:
             cached = self._ssh_targets.get(key)
         if cached is not None:
@@ -222,7 +223,7 @@ class Runner:
         if not isinstance(command, str) or not 0 < len(command) <= 200000:
             raise ValueError("Invalid remote command")
         hostname, port, user, identities = self._ssh_target(attack)
-        control_scope = f"{self.settings.root}\n{attack.mode}"
+        control_scope = f"{self.settings.root}\n{attack.mode}\n{attack.id}"
         root_hash = hashlib.sha256(control_scope.encode()).hexdigest()[:12]
         control_directory = Path(f"/tmp/agentic-lab-{os.getuid()}/{root_hash}")
         control_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -261,61 +262,52 @@ class Runner:
         return self._complete(process, timeout)
 
     def up(self, attack):
-        """Поднимает окружение сценария под общей lifecycle-блокировкой.
-
-        Для escape восстанавливаем init-snapshot: агент мог изменить гостевую систему
-        или Docker daemon, и reset контейнера не гарантирует чистый следующий прогон.
-        Затем provisioning создаёт новый случайный флаг и контейнеры сценария.
-        Исходные agent-сценарии сохраняют обычный up с повторным provisioning.
-        """
+        """Восстанавливает подготовленный clone и активирует готовые контейнеры."""
         with self.transaction(attack):
-            if attack.mode == "escape":
-                started = time.monotonic()
-                emit = log_sink.get()
-                if emit:
-                    emit("system", "[lab] restoring clean escape VM snapshot\n")
-                snapshot = escape_snapshot(self.settings.root)
-                result = self.run(
-                    attack,
-                    ["snapshot", "restore", snapshot],
-                    self.settings.lifecycle_timeout,
-                )
-                if result.exit_code or result.timed_out:
-                    return result
-                result = self.run(
-                    attack,
-                    ["provision"],
-                    self.settings.lifecycle_timeout,
-                )
-                timing = (
-                    "[lab] snapshot restore + provisioning: "
-                    f"{time.monotonic() - started:.1f}s\n"
-                )
-                result.stdout += "\n" + timing
-                if emit:
-                    emit("system", timing)
-                return result
-            return self.run(
+            started = time.monotonic()
+            emit = log_sink.get()
+            if emit:
+                emit("system", f"[lab] restoring prepared VM for {attack.id}\n")
+            snapshot = scenario_snapshot(self.settings.root, attack)
+            result = self.run(
                 attack,
-                ["up", "--provider=virtualbox", "--provision"],
+                ["snapshot", "restore", snapshot],
                 self.settings.lifecycle_timeout,
             )
+            if result.exit_code or result.timed_out:
+                return result
+            if attack.mode == "escape":
+                command = (
+                    "sudo env LAB_ESCAPE_PROFILE="
+                    + shlex.quote(attack.profile)
+                    + " LAB_GUEST_WORKSPACE=/opt/agentic-lab "
+                    "bash /opt/agentic-lab/vm/escape/activate.sh"
+                )
+            else:
+                command = "sudo bash /workspace/vm/activate.sh"
+            result = self.remote(attack, command, self.settings.lifecycle_timeout)
+            timing = (
+                "[lab] prepared VM restore + activation: "
+                f"{time.monotonic() - started:.1f}s\n"
+            )
+            result.stdout += "\n" + timing
+            if emit:
+                emit("system", timing)
+            return result
 
     def down(self, attack):
-        """Очищает escape VM snapshot-откатом; обычную лабораторную VM удаляет."""
+        """Откатывает clone сценария к чистому snapshot и оставляет выключенным."""
         with self.transaction(attack):
-            if attack.mode == "escape":
-                return self.run(
-                    attack,
-                    [
-                        "snapshot",
-                        "restore",
-                        escape_snapshot(self.settings.root),
-                        "--no-start",
-                    ],
-                    self.settings.lifecycle_timeout,
-                )
-            return self.run(attack, ["destroy", "-f"], self.settings.lifecycle_timeout)
+            return self.run(
+                attack,
+                [
+                    "snapshot",
+                    "restore",
+                    scenario_snapshot(self.settings.root, attack),
+                    "--no-start",
+                ],
+                self.settings.lifecycle_timeout,
+            )
 
     def sandbox(self, attack, request):
         """Выполняет команду внутри sandbox-контейнера выбранного сценария.

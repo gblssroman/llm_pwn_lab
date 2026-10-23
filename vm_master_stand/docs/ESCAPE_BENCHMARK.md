@@ -12,20 +12,22 @@ uv run benchmark list
 
 `benchmark init` один раз готовит локальный box: отдельная builder VM в
 `.cache/escape-boxes/`, Docker/Compose, cron, компилятор, kernel/headers и
-escape-образ с OpenClaw. VM упаковывается и регистрируется в Vagrant; рабочая
-VM из `vagrant/` для сборки не используется. Builder удаляется после упаковки,
-а box остаётся в локальном кеше. Флаги, challenge state и настройки модели
-при инициализации не создаются. Первичная подготовка остаётся долгой.
+escape-образ с OpenClaw. VM упаковывается и регистрируется в Vagrant; рабочие
+linked clones создаются отдельно. Builder удаляется после упаковки, а box остаётся
+в локальном кеше. Snapshot может содержать только стартовый synthetic state;
+escape-флаг заменяется перед каждым прогоном. Настройки модели не сохраняются.
+Первичная подготовка остаётся долгой.
 
 Если headers старого ядра базового box отсутствуют, builder устанавливает
 актуальную пару kernel/headers. Перед упаковкой VM перезагружается и проверяет
 наличие headers работающего ядра и готовность Docker через SSH.
 
-Init сохраняет имя box, версию OpenClaw и имя чистого snapshot в
-`.runtime/benchmark.json`. После регистрации box он один раз создаёт изолированную
-runtime VM без host mount, проверяет Docker, выключает VM и сохраняет snapshot.
-Vagrant metadata этой VM хранится отдельно в `.runtime/vagrant/escape`, поэтому
-cleanup обычных agent-сценариев не может удалить escape-snapshot.
+Init сохраняет имя box, версию OpenClaw и поколение чистых snapshots в
+`.runtime/benchmark.json`. После регистрации box он создаёт отдельный linked clone
+для каждого agent- и escape-сценария, один раз выполняет provisioning, проверяет
+контейнеры, выключает VM и сохраняет snapshot. Vagrant metadata находятся в
+`.runtime/vagrant/scenarios/<generation>/<mode>/<scenario>`; изменяемые диски и
+snapshots разных сценариев не разделяются.
 Повторный init использует существующий зарегистрированный box, если входные
 файлы, base box и версия OpenClaw не изменились. При удалённом box или изменении
 входных данных выполняется новая подготовка. `--force` позволяет её повторить
@@ -58,22 +60,21 @@ docker compose up -d --build
 `LAB_VAGRANT_BOX` и `LAB_OPENCLAW_VERSION` остаются явными overrides. Если в
 старом `.env` задан `LAB_VAGRANT_BOX=bento/ubuntu-24.04`, уберите этот override
 или оставьте его пустым, чтобы панель выбирала подготовленный box. Python launcher
-не читает `.env` автоматически. Без init прямые API/старый runner сохраняют
-возможность холодного запуска базового box; новая команда run просит сначала init.
+не читает `.env` автоматически. Без init lifecycle вернёт явную ошибку с просьбой
+выполнить `benchmark init`.
 
-Каждый escape `up` восстанавливает чистый snapshot одной последовательной runtime
-VM. Изменения Docker daemon, гостевого ядра или `/etc` от предыдущего escape не
-переносятся в следующий прогон. `down` повторно восстанавливает snapshot без старта.
-Provisioning проверяет зависимости и образ;
-при совпадении пропускает APT и сборку, создаёт новый state и флаг. Журнал `[lab]`
-показывает времена этапов и полный цикл. Повторный импорт box больше не нужен.
-После первого `vagrant ssh-config` tool calls используют прямой SSH с ControlMaster.
+Каждый escape `up` восстанавливает snapshot готового clone, загружает VM, запускает
+уже созданный sandbox и генерирует новый флаг. Изменения Docker daemon, гостевого
+ядра или `/etc` не переносятся в следующий прогон. `down` повторно восстанавливает
+snapshot без старта. В runtime нет APT, build, pull или provisioning; журнал `[lab]`
+показывает время restore + activation. После первого `vagrant ssh-config` tool calls
+используют прямой SSH с ControlMaster.
 
-Изменение Dockerfile, adapter.py или версии OpenClaw меняет хеш image tag;
-отсутствующий образ собирается автоматически. Для постоянных изменений повторите
-init, чтобы новые VM снова получали готовый образ. Init также учитывает изменения
-рецепта подготовки и Vagrantfile. Старые зарегистрированные версии box автоматически
-не удаляются. Готовые `.box`, `.cache`, `.runtime` и VM-state не входят в исходники.
+После изменения Dockerfile, setup/activation scripts, adapter.py или версии OpenClaw
+повторите init, чтобы создать новое полностью готовое поколение clones. Init учитывает
+эти файлы и Vagrantfile. Старые зарегистрированные box и поколения VM автоматически
+не удаляются, чтобы не разрушать последнее опубликованное окружение при ошибке init.
+Готовые `.box`, `.cache`, `.runtime` и VM-state не входят в исходники.
 
 Дополнительные параметры: `uv run benchmark init --help` — base box, имя,
 версия OpenClaw, путь `.box` и принудительная новая сборка. Существующий файл

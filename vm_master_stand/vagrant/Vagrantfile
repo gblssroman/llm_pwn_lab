@@ -6,6 +6,8 @@ guest_workspace = isolated_escape ? "/opt/agentic-lab" : "/workspace"
 Vagrant.configure("2") do |config|
   config.vm.box = ENV.fetch("LAB_VAGRANT_BOX", "bento/ubuntu-24.04")
   config.vm.hostname = "atlas-agent-lab"
+  # The prepared-box builder reboots after installing a matching kernel/headers.
+  config.vm.boot_timeout = ENV["LAB_BUILD_ESCAPE_BOX"] == "1" ? 600 : 300
   # A distributable builder VM must retain the base box's bootstrap SSH key.
   config.ssh.insert_key = false if ENV["LAB_BUILD_ESCAPE_BOX"] == "1"
   config.vm.network "forwarded_port", guest: 22, host: 2222, host_ip: "127.0.0.1", id: "ssh", auto_correct: true
@@ -16,6 +18,7 @@ Vagrant.configure("2") do |config|
   config.vm.provider "virtualbox" do |vb|
     vb.cpus = 2
     vb.memory = 4096
+    vb.linked_clone = ENV["LAB_LINKED_CLONE"] == "1"
   end
   config.vm.provision "shell", path: setup, privileged: true, env: { "LAB_ESCAPE_PROFILE" => ENV.fetch("LAB_ESCAPE_PROFILE", ""), "LAB_OPENCLAW_VERSION" => ENV.fetch("LAB_OPENCLAW_VERSION", ""), "LAB_OPENCLAW_COMMAND" => ENV.fetch("LAB_OPENCLAW_COMMAND", ""), "LAB_GUEST_WORKSPACE" => guest_workspace }
 end

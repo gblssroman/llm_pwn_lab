@@ -1,9 +1,11 @@
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
+
 from lab_service.config import Settings
 from lab_service.models import ExecResult
 from lab_service.runner import Runner
@@ -23,7 +25,7 @@ def test_escape_up_restores_snapshot_and_stops_on_failed_restore(monkeypatch, fa
     monkeypatch.setattr(runner, "transaction", lambda _: nullcontext())
     calls = []
 
-    monkeypatch.setattr("lab_service.runner.escape_snapshot", lambda _: "clean")
+    monkeypatch.setattr("lab_service.runner.scenario_snapshot", lambda *_: "clean")
 
     def run(attack, args, timeout):
         calls.append(args)
@@ -35,13 +37,17 @@ def test_escape_up_restores_snapshot_and_stops_on_failed_restore(monkeypatch, fa
         return ExecResult(exit_code=0)
 
     monkeypatch.setattr(runner, "run", run)
+    remote = Mock(return_value=ExecResult(exit_code=0))
+    monkeypatch.setattr(runner, "remote", remote)
     result = runner.up(Scenarios(ROOT, "escapes").load("docker-socket"))
     assert calls[0] == ["snapshot", "restore", "clean"]
     if failure:
         assert len(calls) == 1 and result.exit_code
+        assert not remote.called
     else:
-        assert calls[1] == ["provision"]
-        assert "snapshot restore + provisioning:" in result.stdout
+        assert len(calls) == 1
+        assert "prepared VM restore + activation:" in result.stdout
+        assert "LAB_ESCAPE_PROFILE=docker-socket" in remote.call_args.args[1]
 
 
 def test_escape_down_restores_snapshot_without_start(monkeypatch):
@@ -51,7 +57,7 @@ def test_escape_down_restores_snapshot_without_start(monkeypatch):
     from contextlib import nullcontext
 
     monkeypatch.setattr(runner, "transaction", lambda _: nullcontext())
-    monkeypatch.setattr("lab_service.runner.escape_snapshot", lambda _: "clean")
+    monkeypatch.setattr("lab_service.runner.scenario_snapshot", lambda *_: "clean")
     run = Mock(return_value=ExecResult(exit_code=0))
     monkeypatch.setattr(runner, "run", run)
     runner.down(Scenarios(ROOT, "escapes").load("docker-socket"))
@@ -206,10 +212,12 @@ lab_dependencies all
 
 
 def init_root(tmp_path):
+    shutil.copytree(ROOT / "attacks", tmp_path / "attacks")
+    shutil.copytree(ROOT / "escapes", tmp_path / "escapes")
     for name in builder_module().BOX_INPUTS:
         path = tmp_path / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(name)
+        shutil.copyfile(ROOT / name, path)
     return tmp_path
 
 
@@ -223,14 +231,15 @@ def test_init_reuses_registered_box_and_rebuilds_changed_inputs(monkeypatch, tmp
     )
     snapshots = []
     monkeypatch.setattr(
-        module, "prepare_runtime_snapshot", lambda *args: snapshots.append(args)
+        module, "prepare_scenario_snapshot", lambda *args: snapshots.append(args)
     )
-    monkeypatch.setattr(module, "_snapshot_available", lambda *args: True)
+    monkeypatch.setattr(module, "_scenario_snapshot_available", lambda *args: True)
     first = module.init_benchmark(root, name="lab/prepared")
     assert module.init_benchmark(root) == first
     assert len(calls) == 1
-    assert len(snapshots) == 1
+    assert len(snapshots) == 12
     assert first["snapshot"] == "agentic-lab-clean"
+    assert len(first["scenarios"]) == 12
     assert module.escape_config(root) == ("lab/prepared", "2026.9.6")
     assert module.escape_config(root, "lab/override", "2026.9.7") == (
         "lab/override",
@@ -243,7 +252,7 @@ def test_init_reuses_registered_box_and_rebuilds_changed_inputs(monkeypatch, tmp
     assert module.selected_box(root) == "lab/new"
 
 
-def test_runtime_snapshot_is_isolated_and_powered_off(monkeypatch, tmp_path):
+def test_scenario_snapshot_is_linked_isolated_and_powered_off(monkeypatch, tmp_path):
     module = builder_module()
     root = init_root(tmp_path)
     calls = []
@@ -252,25 +261,35 @@ def test_runtime_snapshot_is_isolated_and_powered_off(monkeypatch, tmp_path):
         calls.append((root_arg, environment, list(args), kwargs))
 
     monkeypatch.setattr(module, "_runtime_vagrant", vagrant)
-    module.prepare_runtime_snapshot(root, "lab/prepared", "2026.9.7", "clean")
+    attack = Scenarios(root, "escapes").load("docker-socket")
+    generation = "20261023-000000-000000"
+    module.prepare_scenario_snapshot(
+        root, attack, "lab/prepared", "2026.9.7", generation, "clean"
+    )
 
     assert [item[2] for item in calls] == [
         ["destroy", "-f"],
-        ["up", "--provider=virtualbox", "--no-provision"],
+        ["up", "--provider=virtualbox", "--provision"],
         [
             "ssh",
             "-c",
-            "test -d /opt/agentic-lab/vm/escape && sudo docker info >/dev/null",
+            (
+                "cd /opt/agentic-lab && sudo docker info >/dev/null && "
+                "sudo docker compose -f vm/escape/compose.yml ps --status running "
+                "--services | grep -qx sandbox"
+            ),
         ],
-        ["halt", "-f"],
+        ["halt"],
         ["snapshot", "save", "-f", "clean"],
     ]
     environment = calls[0][1]
     assert environment["LAB_ISOLATED_ESCAPE"] == "1"
     assert environment["LAB_VAGRANT_BOX"] == "lab/prepared"
     assert environment["LAB_OPENCLAW_VERSION"] == "2026.9.7"
+    assert environment["LAB_LINKED_CLONE"] == "1"
     assert environment["VAGRANT_DOTFILE_PATH"] == str(
-        root / ".runtime/vagrant/escape"
+        root
+        / ".runtime/vagrant/scenarios/20261023-000000-000000/escape/docker-socket"
     )
 
 
@@ -280,7 +299,7 @@ def test_init_rebuilds_missing_box_and_does_not_publish_failed_build(
     module = builder_module()
     root = init_root(tmp_path)
     monkeypatch.setattr(module, "build_box", lambda *args, **kwargs: None)
-    monkeypatch.setattr(module, "prepare_runtime_snapshot", lambda *args: None)
+    monkeypatch.setattr(module, "prepare_scenario_snapshot", lambda *args: None)
     module.init_benchmark(root, name="lab/first")
     monkeypatch.setattr(module, "box_registered", lambda _: False)
     calls = []
@@ -299,7 +318,6 @@ def test_init_rebuilds_missing_box_and_does_not_publish_failed_build(
 
 
 def test_runner_uses_initialized_box_and_version(monkeypatch, tmp_path):
-    import shutil
     from unittest.mock import Mock
 
     from lab_service.benchmark import init_benchmark
@@ -307,10 +325,8 @@ def test_runner_uses_initialized_box_and_version(monkeypatch, tmp_path):
     module = builder_module()
     root = init_root(tmp_path)
     monkeypatch.setattr(module, "build_box", lambda *args, **kwargs: None)
-    monkeypatch.setattr(module, "prepare_runtime_snapshot", lambda *args: None)
+    monkeypatch.setattr(module, "prepare_scenario_snapshot", lambda *args: None)
     init_benchmark(root, name="lab/prepared", version="2026.9.7")
-    shutil.copytree(ROOT / "escapes", root / "escapes")
-    (root / "vm/escape/setup.sh").write_text("setup")
     process = Mock(pid=123, returncode=0)
     process.communicate.return_value = (b"ok", b"")
     popen = Mock(return_value=process)

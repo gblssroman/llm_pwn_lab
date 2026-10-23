@@ -14,7 +14,7 @@ let attack = null,
 // generation — при выборе журнала. Поздний ответ старого запроса игнорируется.
 const labels = {
   up: 'Поднять / сбросить VM',
-  down: 'Удалить VM',
+  down: 'Сбросить и выключить VM',
   verify: 'Проверка',
   sandbox: 'Sandbox',
   evaluator: 'Evaluator',
@@ -323,7 +323,7 @@ document.querySelectorAll('[data-action]').forEach(button => button.onclick = as
     }
     return;
   }
-  if ((action === 'down' || action === 'up') && !confirm(action === 'down' ? 'Удалить лабораторную VM и её данные?' : attack.mode === 'escape' ? 'Создать чистую VM для escape-сценария? Существующая лабораторная VM и её данные будут удалены.' : 'Поднять VM? Если она уже существует, БД и память sandbox будут сброшены.')) return;
+  if ((action === 'down' || action === 'up') && !confirm(action === 'down' ? 'Откатить snapshot сценария и выключить VM?' : 'Восстановить чистый snapshot сценария и поднять VM?')) return;
   let body;
   if (action === 'exec') {
     action = $('channel').value;
