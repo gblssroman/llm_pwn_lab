@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import subprocess
@@ -304,6 +305,122 @@ def test_scenario_snapshot_is_linked_isolated_and_saved(monkeypatch, tmp_path):
         root
         / ".runtime/vagrant/scenarios/20261023-000000-000000/escape/docker-socket"
     )
+
+
+def test_scenario_snapshot_retries_only_failed_clone(monkeypatch, tmp_path):
+    module = builder_module()
+    root = init_root(tmp_path)
+    calls = []
+    powered_off = []
+    failed_once = False
+
+    def vagrant(root_arg, environment, *args, **kwargs):
+        nonlocal failed_once
+        calls.append(list(args))
+        if args[0] == "up" and not failed_once:
+            failed_once = True
+            raise subprocess.CalledProcessError(1, ["vagrant", *args])
+
+    monkeypatch.setattr(module, "_runtime_vagrant", vagrant)
+    monkeypatch.setattr(
+        module,
+        "_power_off_failed_clone",
+        lambda dotfile, attack: powered_off.append(attack.id),
+    )
+    attack = Scenarios(root, "escapes").load("docker-socket")
+    module.prepare_scenario_snapshot(
+        root,
+        attack,
+        "lab/prepared",
+        "2026.9.7",
+        "20261023-000000-000000",
+        "clean",
+    )
+
+    assert [call[0] for call in calls].count("up") == 2
+    assert [call[0] for call in calls].count("destroy") == 2
+    assert powered_off == ["docker-socket"]
+    assert calls[-2:] == [
+        ["snapshot", "save", "-f", "clean"],
+        ["snapshot", "restore", "clean", "--no-start"],
+    ]
+
+
+def test_failed_clone_poweroff_targets_recorded_running_vm(monkeypatch, tmp_path):
+    module = builder_module()
+    dotfile = tmp_path / "vagrant-state"
+    machine = dotfile / "machines/default/virtualbox"
+    machine.mkdir(parents=True)
+    vm_id = "01234567-89ab-cdef-0123-456789abcdef"
+    (machine / "id").write_text(vm_id)
+    results = [
+        Mock(returncode=0, stdout='VMState="running"\n'),
+        Mock(returncode=0, stdout=""),
+    ]
+    run = Mock(side_effect=results)
+    monkeypatch.setattr(module.subprocess, "run", run)
+    monkeypatch.setattr(module.shutil, "which", lambda _: "/usr/bin/VBoxManage")
+
+    attack = Scenarios(ROOT, "escapes").load("docker-socket")
+    module._power_off_failed_clone(dotfile, attack)
+
+    assert run.call_args_list[0].args[0] == [
+        "/usr/bin/VBoxManage",
+        "showvminfo",
+        vm_id,
+        "--machinereadable",
+    ]
+    assert run.call_args_list[1].args[0] == [
+        "/usr/bin/VBoxManage",
+        "controlvm",
+        vm_id,
+        "poweroff",
+    ]
+
+
+def test_init_resumes_staging_generation(monkeypatch, tmp_path):
+    module = builder_module()
+    root = init_root(tmp_path)
+    builds = []
+    prepared = []
+    ready = set()
+    should_fail = True
+
+    monkeypatch.setattr(module, "box_registered", lambda _: True)
+    monkeypatch.setattr(
+        module, "build_box", lambda *args, **kwargs: builds.append((args, kwargs))
+    )
+
+    def available(root_arg, attack, box, version, generation, snapshot):
+        return module.scenario_key(attack) in ready
+
+    def prepare(root_arg, attack, box, version, generation, snapshot):
+        nonlocal should_fail
+        key = module.scenario_key(attack)
+        prepared.append(key)
+        if should_fail and len(prepared) == 2:
+            raise subprocess.CalledProcessError(1, ["vagrant", "up"])
+        ready.add(key)
+
+    monkeypatch.setattr(module, "_scenario_snapshot_available", available)
+    monkeypatch.setattr(module, "prepare_scenario_snapshot", prepare)
+
+    with pytest.raises(subprocess.CalledProcessError):
+        module.init_benchmark(root, name="lab/prepared")
+
+    staging_path = root / ".runtime/benchmark-init.json"
+    staging = json.loads(staging_path.read_text())
+    first_generation = staging["generation"]
+    assert staging["completed"] == [prepared[0]]
+    assert len(builds) == 1
+
+    should_fail = False
+    state = module.init_benchmark(root)
+    assert len(builds) == 1
+    assert state["generation"] == first_generation
+    assert prepared.count(staging["completed"][0]) == 1
+    assert not staging_path.exists()
+    assert "completed" not in state
 
 
 def test_init_rebuilds_missing_box_and_does_not_publish_failed_build(

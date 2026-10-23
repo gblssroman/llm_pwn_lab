@@ -20,6 +20,8 @@ DEFAULT_BOX = "bento/ubuntu-24.04"
 DEFAULT_OPENCLAW_VERSION = "2026.9.6"
 PREPARATION_TIMEOUT = 7200
 SNAPSHOT_NAME = "agentic-lab-clean"
+SCENARIO_PREPARATION_ATTEMPTS = 3
+STAGING_STATE_NAME = "benchmark-init.json"
 
 # Изменение любого из этих файлов требует новой подготовки VM-образа.
 BOX_INPUTS = (
@@ -279,6 +281,41 @@ def _save_state(state_path, data):
     os.replace(temporary_path, state_path)
 
 
+def _can_resume_initialization(
+    candidate, fingerprint, expected_scenarios, name, output
+):
+    """Проверяет незавершённое поколение перед продолжением init."""
+    if not isinstance(candidate, dict):
+        return False
+    if candidate.get("fingerprint") != fingerprint:
+        return False
+    if candidate.get("scenarios") != expected_scenarios:
+        return False
+    if candidate.get("snapshot") != SNAPSHOT_NAME:
+        return False
+    generation = candidate.get("generation")
+    if not isinstance(generation, str) or not re.fullmatch(
+        r"[0-9]{8}-[0-9]{6}-[0-9]{6}", generation
+    ):
+        return False
+    completed = candidate.get("completed")
+    if not isinstance(completed, list) or not set(completed) <= set(
+        expected_scenarios
+    ):
+        return False
+    box_name = candidate.get("box")
+    box_file = candidate.get("box_file")
+    if not isinstance(box_name, str) or not box_name:
+        return False
+    if not isinstance(box_file, str) or not Path(box_file).is_absolute():
+        return False
+    if name is not None and box_name != name:
+        return False
+    if output is not None and box_file != str(output.resolve()):
+        return False
+    return box_registered(box_name)
+
+
 def _scenario_environment(root, attack, box_name, version, generation):
     """Строит окружение отдельного linked clone конкретного сценария."""
     environment = {
@@ -320,6 +357,56 @@ def _runtime_vagrant(root, environment, *args, capture=False):
         print(f"[vm] {args[0]}: {time.monotonic() - started:.1f}s", flush=True)
 
 
+def _power_off_failed_clone(dotfile, attack):
+    """Адресно останавливает зависший VBoxHeadless до удаления failed clone."""
+    try:
+        vm_id = (
+            dotfile / "machines" / "default" / "virtualbox" / "id"
+        ).read_text().strip()
+        if not re.fullmatch(
+            r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", vm_id
+        ):
+            return
+        executable = shutil.which("VBoxManage") or "VBoxManage"
+        info = subprocess.run(
+            [executable, "showvminfo", vm_id, "--machinereadable"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        state = re.search(r'^VMState="([^"]+)"$', info.stdout, re.MULTILINE)
+        if info.returncode or state is None or state.group(1) not in {
+            "running",
+            "paused",
+            "stuck",
+            "guru_meditation",
+            "live_snapshotting",
+        }:
+            return
+        stopped = subprocess.run(
+            [executable, "controlvm", vm_id, "poweroff"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if stopped.returncode:
+            print(
+                f"[scenario] unable to power off failed "
+                f"{attack.mode}:{attack.id} clone",
+                flush=True,
+            )
+        else:
+            print(
+                f"[scenario] powered off failed {attack.mode}:{attack.id} clone",
+                flush=True,
+            )
+    except (OSError, subprocess.SubprocessError):
+        # The following Vagrant destroy remains the authoritative cleanup path.
+        return
+
+
 def _scenario_snapshot_available(
     root, attack, box_name, version, generation, snapshot
 ):
@@ -354,29 +441,57 @@ def prepare_scenario_snapshot(
     dotfile.mkdir(mode=0o700, parents=True, exist_ok=True)
     dotfile.chmod(0o700)
     print(f"[scenario] preparing {attack.mode}:{attack.id}", flush=True)
-    _runtime_vagrant(root, environment, "destroy", "-f")
-    _runtime_vagrant(root, environment, "up", "--provider=virtualbox", "--provision")
     workspace = "/opt/agentic-lab" if attack.mode == "escape" else "/workspace"
     compose = (
         "vm/escape/compose.yml"
         if attack.mode == "escape"
         else "vm/agent-compose.yml"
     )
-    _runtime_vagrant(
-        root,
-        environment,
-        "ssh",
-        "-c",
-        f"cd {workspace} && sudo docker info >/dev/null && "
-        f"sudo docker compose -f {compose} ps --status running --services "
-        "| grep -qx sandbox",
-    )
-    # Saving a running VirtualBox VM includes RAM/CPU/device state. Restoring it
-    # without start releases host RAM while preserving a fast resume point.
-    _runtime_vagrant(root, environment, "snapshot", "save", "-f", snapshot)
-    _runtime_vagrant(
-        root, environment, "snapshot", "restore", snapshot, "--no-start"
-    )
+    for attempt in range(1, SCENARIO_PREPARATION_ATTEMPTS + 1):
+        _runtime_vagrant(root, environment, "destroy", "-f")
+        try:
+            _runtime_vagrant(
+                root,
+                environment,
+                "up",
+                "--provider=virtualbox",
+                "--provision",
+            )
+            _runtime_vagrant(
+                root,
+                environment,
+                "ssh",
+                "-c",
+                f"cd {workspace} && sudo docker info >/dev/null && "
+                f"sudo docker compose -f {compose} ps --status running --services "
+                "| grep -qx sandbox",
+            )
+            # A running VirtualBox snapshot includes RAM/CPU/device state. Restore
+            # without start releases host RAM while preserving the resume point.
+            _runtime_vagrant(root, environment, "snapshot", "save", "-f", snapshot)
+            _runtime_vagrant(
+                root, environment, "snapshot", "restore", snapshot, "--no-start"
+            )
+            return
+        except subprocess.SubprocessError as exc:
+            _power_off_failed_clone(dotfile, attack)
+            if attempt < SCENARIO_PREPARATION_ATTEMPTS:
+                print(
+                    f"[scenario] {attack.mode}:{attack.id} attempt "
+                    f"{attempt}/{SCENARIO_PREPARATION_ATTEMPTS} failed: {exc}; "
+                    "recreating only this clone",
+                    flush=True,
+                )
+                continue
+            try:
+                _runtime_vagrant(root, environment, "destroy", "-f")
+            except (OSError, subprocess.SubprocessError) as cleanup_error:
+                print(
+                    f"[scenario] cleanup failed for {attack.mode}:{attack.id}: "
+                    f"{cleanup_error}",
+                    flush=True,
+                )
+            raise
 
 
 def init_benchmark(
@@ -395,8 +510,9 @@ def init_benchmark(
 
     Файловые блокировки исключают параллельный init и запуск сценария. Новое
     поколение clones публикуется только после успешной подготовки всех VM: при
-    ошибке runner продолжит видеть прошлое поколение. Связанные диски разделяют
-    только неизменяемый base; состояние каждого сценария и snapshot независимы.
+    ошибке runner продолжит видеть прошлое поколение, а следующий init продолжит
+    staging-поколение. Связанные диски разделяют только неизменяемый base;
+    состояние каждого сценария и snapshot независимы.
     """
     from .scenarios import Scenarios
 
@@ -407,6 +523,7 @@ def init_benchmark(
     locks_directory = root / ".locks"
     locks_directory.mkdir(exist_ok=True)
     state_path = root / ".runtime/benchmark.json"
+    staging_path = root / ".runtime" / STAGING_STATE_NAME
     vagrantfile = (root / "vagrant/Vagrantfile").resolve()
     lifecycle_lock = hashlib.sha256(str(vagrantfile).encode()).hexdigest()
 
@@ -419,18 +536,9 @@ def init_benchmark(
         previous = _read_previous_state(state_path)
         reuse_box = not force and _can_reuse_box(previous, fingerprint, name, output)
         stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S-%f")
-        if reuse_box:
-            box_name = previous["box"]
-            box_file = Path(previous["box_file"])
-        else:
-            # Уникальное имя сохраняет прошлую регистрацию, пока новая не готова.
-            box_name = name or f"agentic-lab/escape-{stamp}"
-            box_file = output or root / ".cache/escape-boxes" / f"escape-{stamp}.box"
-            box_file = box_file.resolve()
-            build_box(base_box, box_name, box_file, version, root=root)
-
         snapshot = SNAPSHOT_NAME
         previous_generation = previous.get("generation")
+        previous_box_name = previous.get("box")
         reuse_scenarios = (
             reuse_box
             and previous.get("scenarios") == expected_scenarios
@@ -439,7 +547,7 @@ def init_benchmark(
                 _scenario_snapshot_available(
                     root,
                     scenario,
-                    box_name,
+                    previous_box_name,
                     version,
                     previous_generation,
                     snapshot,
@@ -448,25 +556,77 @@ def init_benchmark(
             )
         )
         if reuse_scenarios:
-            print(f"Benchmark already initialized: {box_name}", flush=True)
+            staging_path.unlink(missing_ok=True)
+            print(f"Benchmark already initialized: {previous_box_name}", flush=True)
             return previous
 
-        generation = stamp
+        staging = _read_previous_state(staging_path)
+        resume = not force and _can_resume_initialization(
+            staging, fingerprint, expected_scenarios, name, output
+        )
+        if resume:
+            box_name = staging["box"]
+            box_file = Path(staging["box_file"])
+            generation = staging["generation"]
+            completed = set(staging["completed"])
+            print(
+                f"[init] resuming generation {generation}: "
+                f"{len(completed)}/{len(scenarios)} scenarios recorded",
+                flush=True,
+            )
+        else:
+            if reuse_box:
+                box_name = previous["box"]
+                box_file = Path(previous["box_file"])
+            else:
+                # Уникальное имя сохраняет прошлую регистрацию, пока новая не готова.
+                box_name = name or f"agentic-lab/escape-{stamp}"
+                box_file = (
+                    output
+                    or root / ".cache/escape-boxes" / f"escape-{stamp}.box"
+                )
+                box_file = box_file.resolve()
+                build_box(base_box, box_name, box_file, version, root=root)
+            generation = stamp
+            completed = set()
+            staging = {
+                "box": box_name,
+                "snapshot": snapshot,
+                "generation": generation,
+                "scenarios": expected_scenarios,
+                "fingerprint": fingerprint,
+                "openclaw_version": version,
+                "base_box": base_box,
+                "box_file": str(box_file),
+                "completed": [],
+            }
+            _save_state(staging_path, staging)
+
         for scenario in scenarios:
+            key = scenario_key(scenario)
+            dotfile = scenario_vagrant_path(root, scenario, generation)
+            if (key in completed or dotfile.exists()) and _scenario_snapshot_available(
+                root, scenario, box_name, version, generation, snapshot
+            ):
+                if key not in completed:
+                    completed.add(key)
+                    staging["completed"] = [
+                        item for item in expected_scenarios if item in completed
+                    ]
+                    _save_state(staging_path, staging)
+                print(f"[scenario] reusing {key}", flush=True)
+                continue
             prepare_scenario_snapshot(
                 root, scenario, box_name, version, generation, snapshot
             )
-        state = {
-            "box": box_name,
-            "snapshot": snapshot,
-            "generation": generation,
-            "scenarios": expected_scenarios,
-            "fingerprint": fingerprint,
-            "openclaw_version": version,
-            "base_box": base_box,
-            "box_file": str(box_file),
-        }
+            completed.add(key)
+            staging["completed"] = [
+                item for item in expected_scenarios if item in completed
+            ]
+            _save_state(staging_path, staging)
+        state = {key: value for key, value in staging.items() if key != "completed"}
         _save_state(state_path, state)
+        staging_path.unlink(missing_ok=True)
 
     print(
         "Benchmark initialized with per-scenario linked clones. "
