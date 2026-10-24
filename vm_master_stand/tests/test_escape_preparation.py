@@ -266,6 +266,58 @@ def test_init_reuses_registered_box_and_rebuilds_changed_inputs(monkeypatch, tmp
     assert module.selected_box(root) == "lab/new"
 
 
+def test_ssh_port_migration_reuses_box_but_rebuilds_scenario_clones(
+    monkeypatch, tmp_path
+):
+    module = builder_module()
+    root = init_root(tmp_path)
+    builds = []
+    snapshots = []
+    monkeypatch.setattr(module, "box_registered", lambda _: True)
+    monkeypatch.setattr(
+        module, "build_box", lambda *args, **kwargs: builds.append((args, kwargs))
+    )
+    monkeypatch.setattr(
+        module, "prepare_scenario_snapshot", lambda *args: snapshots.append(args)
+    )
+    monkeypatch.setattr(module, "_scenario_snapshot_available", lambda *args: True)
+
+    first = module.init_benchmark(root, name="lab/prepared")
+    previous = dict(first)
+    previous["fingerprint"] = module._box_fingerprint(
+        root,
+        previous["base_box"],
+        previous["openclaw_version"],
+        legacy_ssh_config=True,
+    )
+    (root / ".runtime/benchmark.json").write_text(json.dumps(previous))
+    snapshots.clear()
+    builds.clear()
+
+    migrated = module.init_benchmark(root)
+
+    assert builds == []
+    assert len(snapshots) == 12
+    assert migrated["generation"] != first["generation"]
+    assert migrated["fingerprint"] == module._box_fingerprint(
+        root, migrated["base_box"], migrated["openclaw_version"]
+    )
+
+
+def test_scenario_ssh_ports_are_stable_unique_and_non_ephemeral(tmp_path):
+    module = builder_module()
+    root = init_root(tmp_path)
+    scenarios = [*Scenarios(root).all(), *Scenarios(root, "escapes").all()]
+    ports = [module.scenario_ssh_port(item) for item in scenarios]
+
+    module._validate_scenario_ssh_ports(scenarios)
+
+    assert len(set(ports)) == len(scenarios)
+    assert all(20000 <= port < 30000 for port in ports)
+    docker_socket = Scenarios(root, "escapes").load("docker-socket")
+    assert module.scenario_ssh_port(docker_socket) == 26985
+
+
 def test_scenario_snapshot_is_linked_isolated_and_saved(monkeypatch, tmp_path):
     module = builder_module()
     root = init_root(tmp_path)
@@ -301,6 +353,7 @@ def test_scenario_snapshot_is_linked_isolated_and_saved(monkeypatch, tmp_path):
     assert environment["LAB_VAGRANT_BOX"] == "lab/prepared"
     assert environment["LAB_OPENCLAW_VERSION"] == "2026.9.7"
     assert environment["LAB_LINKED_CLONE"] == "1"
+    assert environment["LAB_SSH_HOST_PORT"] == "26985"
     assert environment["VAGRANT_DOTFILE_PATH"] == str(
         root
         / ".runtime/vagrant/scenarios/20261023-000000-000000/escape/docker-socket"

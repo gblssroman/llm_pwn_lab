@@ -130,3 +130,49 @@ async def test_vm_master_client_waits_for_busy_resource() -> None:
     assert starts == 2
     assert result["stdout"] == "down"
     await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_vm_master_client_manages_pool_with_evaluator_token() -> None:
+    requests: list[httpx.Request] = []
+
+    def pool_item(desired: str, state: str) -> dict:
+        return {
+            "scenario_id": "docker-socket",
+            "title": "Docker socket",
+            "mode": "escape",
+            "desired": desired,
+            "state": state,
+            "error": None,
+            "updated_at": "2026-10-24T12:00:00Z",
+            "memory_mb": 4096,
+        }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.headers["X-Lab-Token"] == "e" * 32
+        if request.url.path == "/v1/vm-pool" and request.method == "GET":
+            return httpx.Response(200, json=[pool_item("cold", "cold")])
+        if request.url.path == "/v1/vm-pool/warm-all":
+            return httpx.Response(202, json=[pool_item("warm", "queued")])
+        if request.url.path == "/v1/vm-pool/docker-socket/shutdown":
+            return httpx.Response(202, json=pool_item("cold", "resetting"))
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = VmMasterClient(
+        base_url="http://vm-master:8000",
+        evaluator_token="e" * 32,
+        sandbox_token="s" * 32,
+        client=http,
+    )
+
+    listed = await client.list_vm_pool()
+    warmed = await client.change_vm_pool("warm-all")
+    stopped = await client.change_vm_pool_item("docker-socket", "shutdown")
+
+    assert listed[0].state == "cold"
+    assert warmed[0].desired == "warm"
+    assert stopped.state == "resetting"
+    assert [request.method for request in requests] == ["GET", "POST", "POST"]
+    await http.aclose()

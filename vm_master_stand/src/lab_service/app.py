@@ -16,6 +16,7 @@ from .runner import Runner
 from .runner_bridge import BridgeRunner
 from .scenarios import Scenarios
 from .verifier import verify
+from .warm_pool import WarmPool
 
 
 def create_app(settings=None, runner=None):
@@ -38,20 +39,27 @@ def create_app(settings=None, runner=None):
         else:
             app.state.runner = Runner(app.state.settings)
         app.state.scenarios = Scenarios(app.state.settings.root)
-        app.state.scenarios.all()  # Fail early for malformed local configuration.
+        scenarios = app.state.scenarios.all()  # Fail early for malformed local YAML.
         app.state.escape_scenarios = Scenarios(app.state.settings.root, "escapes")
-        app.state.escape_scenarios.all()
+        escape_scenarios = app.state.escape_scenarios.all()
         app.state.submissions = {}
         app.state.jobs = Jobs()
+        app.state.warm_pool = WarmPool(
+            app.state.settings.root,
+            app.state.runner,
+            scenarios + escape_scenarios,
+        )
 
     @asynccontextmanager
     async def lifespan(app):
         """Инициализирует app при старте и дожидается фоновых задач при завершении."""
         configure(app)
+        app.state.warm_pool.start()
         try:
             yield
         finally:
             await asyncio.to_thread(app.state.jobs.close)
+            await asyncio.to_thread(app.state.warm_pool.close)
 
     app = FastAPI(title="Synthetic Agent Lab", lifespan=lifespan)
 
@@ -134,11 +142,49 @@ def create_app(settings=None, runner=None):
             )
         return result
 
+    @app.get("/v1/vm-pool", dependencies=[evaluator])
+    def vm_pool():
+        """Возвращает desired/actual state всех изолированных сценарных VM."""
+        return app.state.warm_pool.list()
+
+    @app.post("/v1/vm-pool/warm-all", status_code=202, dependencies=[evaluator])
+    def warm_all():
+        """Ставит последовательный прогрев всех сценарных VM в фоновую очередь."""
+        return app.state.warm_pool.request_warm_all()
+
+    @app.post("/v1/vm-pool/shutdown-all", status_code=202, dependencies=[evaluator])
+    def shutdown_all():
+        """Ставит сброс всех свободных VM в Saved; занятые ждут cleanup."""
+        return app.state.warm_pool.request_shutdown_all()
+
+    @app.post(
+        "/v1/vm-pool/{attack_id}/warm", status_code=202, dependencies=[evaluator]
+    )
+    def warm_vm(attack_id: str):
+        """Делает выбранную VM желаемо тёплой и запускает reconcile в фоне."""
+        get_attack(attack_id)
+        return app.state.warm_pool.request_warm(attack_id)
+
+    @app.post(
+        "/v1/vm-pool/{attack_id}/shutdown",
+        status_code=202,
+        dependencies=[evaluator],
+    )
+    def shutdown_vm(attack_id: str):
+        """Выключает свободную VM либо откладывает выключение до конца run."""
+        get_attack(attack_id)
+        return app.state.warm_pool.request_shutdown(attack_id)
+
     def lifecycle(attack_id, action):
         """Сбрасывает отправленные флаги и выполняет синхронный up/down общей VM."""
         scenario = get_attack(attack_id)
         app.state.submissions.clear()
-        result = invoke(lambda: getattr(app.state.runner, action)(scenario))
+        operation = (
+            app.state.warm_pool.prepare_for_run
+            if action == "up"
+            else app.state.warm_pool.shutdown_now
+        )
+        result = invoke(lambda: operation(scenario))
         if result.exit_code or result.timed_out:
             raise HTTPException(
                 502, {"message": f"Vagrant {action} failed", **result.model_dump()}
@@ -158,12 +204,26 @@ def create_app(settings=None, runner=None):
     @app.post("/v1/attacks/{attack_id}/sandbox/exec", dependencies=[sandbox])
     def sandbox_exec(attack_id: str, body: ExecRequest):
         """Выполняет команду только внутри sandbox-контейнера выбранного сценария."""
-        return invoke(lambda: app.state.runner.sandbox(get_attack(attack_id), body))
+        scenario = get_attack(attack_id)
+
+        def operation():
+            with app.state.runner.transaction(scenario):
+                app.state.warm_pool.mark_dirty(scenario)
+                return app.state.runner.sandbox(scenario, body)
+
+        return invoke(operation)
 
     @app.post("/v1/attacks/{attack_id}/evaluator/exec", dependencies=[evaluator])
     def evaluator_exec(attack_id: str, body: ExecRequest):
         """Выполняет доверенную команду оператора внутри VM."""
-        return invoke(lambda: app.state.runner.evaluator(get_attack(attack_id), body))
+        scenario = get_attack(attack_id)
+
+        def operation():
+            with app.state.runner.transaction(scenario):
+                app.state.warm_pool.mark_dirty(scenario)
+                return app.state.runner.evaluator(scenario, body)
+
+        return invoke(operation)
 
     @app.post("/v1/attacks/{attack_id}/verify", dependencies=[evaluator])
     def verification(attack_id: str):
@@ -216,13 +276,19 @@ def create_app(settings=None, runner=None):
         runner = app.state.runner
         if action in ("up", "down"):
             app.state.submissions.clear()
-            return getattr(runner, action)(scenario)
+            operation = (
+                app.state.warm_pool.prepare_for_run
+                if action == "up"
+                else app.state.warm_pool.release_after_run
+            )
+            return operation(scenario)
 
         with runner.transaction(scenario):
             if action == "verify":
                 submitted_flag = app.state.submissions.get(scenario.id)
                 return verify(scenario, runner, submitted_flag)
             if action in ("sandbox", "evaluator"):
+                app.state.warm_pool.mark_dirty(scenario)
                 return getattr(runner, action)(scenario, body)
             if action == "status":
                 return runner.run(scenario, ["status", "--machine-readable"], 30)

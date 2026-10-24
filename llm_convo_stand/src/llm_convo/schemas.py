@@ -336,3 +336,25 @@ class VmMasterHealthResponse(BaseModel):
     configured: bool
     status: Literal["ok", "error", "disabled"]
     error: str | None = None
+
+
+class VmPoolItem(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    scenario_id: str
+    title: str
+    mode: Literal["agent", "escape"]
+    desired: Literal["warm", "cold"]
+    state: Literal[
+        "cold",
+        "queued",
+        "warming",
+        "ready",
+        "in_use",
+        "resetting",
+        "dirty",
+        "error",
+    ]
+    error: str | None = None
+    updated_at: datetime
+    memory_mb: int = Field(ge=0)

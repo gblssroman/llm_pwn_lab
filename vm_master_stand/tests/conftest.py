@@ -26,8 +26,11 @@ class FakeRunner:
         self.calls.append((name, attack, request))
         return self.result
 
-    def up(self, attack):
-        return self.record("up", attack)
+    def up(self, attack, *, restore=True):
+        return self.record("up" if restore else "up-warm", attack)
+
+    def warm(self, attack, *, reuse_running=False):
+        return self.record("warm", attack)
 
     def down(self, attack):
         return self.record("down", attack)

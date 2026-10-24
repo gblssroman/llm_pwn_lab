@@ -22,6 +22,19 @@ PREPARATION_TIMEOUT = 7200
 SNAPSHOT_NAME = "agentic-lab-clean"
 SCENARIO_PREPARATION_ATTEMPTS = 3
 STAGING_STATE_NAME = "benchmark-init.json"
+SCENARIO_SSH_PORT_BASE = 20000
+SCENARIO_SSH_PORT_COUNT = 10000
+
+_CURRENT_VAGRANT_SSH_CONFIG = (
+    b'  config.vm.network "forwarded_port", guest: 22, '
+    b'host: Integer(ENV.fetch("LAB_SSH_HOST_PORT", "2222"), 10), '
+    b'host_ip: "127.0.0.1", id: "ssh", '
+    b'auto_correct: !ENV.key?("LAB_SSH_HOST_PORT")\n'
+)
+_LEGACY_VAGRANT_SSH_CONFIG = (
+    b'  config.vm.network "forwarded_port", guest: 22, host: 2222, '
+    b'host_ip: "127.0.0.1", id: "ssh", auto_correct: true\n'
+)
 
 # Изменение любого из этих файлов требует новой подготовки VM-образа.
 BOX_INPUTS = (
@@ -73,6 +86,27 @@ def vagrant_dotfile_path(root, mode, scenario_id=None, generation=None):
 def scenario_key(attack):
     """Даёт стабильный ключ scenario snapshot в benchmark state."""
     return f"{attack.mode}:{attack.id}"
+
+
+def scenario_ssh_port(attack):
+    """Возвращает стабильный уникальный host SSH port для scenario clone."""
+    digest = hashlib.sha256(scenario_key(attack).encode()).digest()
+    return SCENARIO_SSH_PORT_BASE + (
+        int.from_bytes(digest[:2], "big") % SCENARIO_SSH_PORT_COUNT
+    )
+
+
+def _validate_scenario_ssh_ports(scenarios):
+    """Не публикует набор сценариев с коллизией детерминированных портов."""
+    owners = {}
+    for scenario in scenarios:
+        port = scenario_ssh_port(scenario)
+        previous = owners.setdefault(port, scenario_key(scenario))
+        if previous != scenario_key(scenario):
+            raise RuntimeError(
+                f"Scenario SSH port collision on {port}: "
+                f"{previous} and {scenario_key(scenario)}"
+            )
 
 
 def _benchmark_generation(root):
@@ -233,11 +267,21 @@ def box_registered(name):
     )
 
 
-def _box_fingerprint(root, base_box, version):
+def _box_fingerprint(root, base_box, version, *, legacy_ssh_config=False):
     """Вычисляет хеш рецепта подготовки: файлов, базового box и версии CLI."""
     fingerprint = hashlib.sha256((base_box + "\n" + version + "\n").encode())
     for relative_path in BOX_INPUTS:
         contents = (root / relative_path).read_bytes()
+        if (
+            legacy_ssh_config
+            and relative_path == "vagrant/Vagrantfile"
+            and _CURRENT_VAGRANT_SSH_CONFIG in contents
+        ):
+            contents = contents.replace(
+                _CURRENT_VAGRANT_SSH_CONFIG,
+                _LEGACY_VAGRANT_SSH_CONFIG,
+                1,
+            )
         fingerprint.update(relative_path.encode() + b"\0" + contents)
     return fingerprint.hexdigest()
 
@@ -335,6 +379,7 @@ def _scenario_environment(root, attack, box_name, version, generation):
         LAB_ESCAPE_PROFILE=attack.profile if attack.mode == "escape" else "",
         LAB_ISOLATED_ESCAPE="1" if attack.mode == "escape" else "0",
         LAB_LINKED_CLONE="1",
+        LAB_SSH_HOST_PORT=str(scenario_ssh_port(attack)),
     )
     return environment
 
@@ -518,7 +563,11 @@ def init_benchmark(
 
     root = root.resolve()
     fingerprint = _box_fingerprint(root, base_box, version)
+    legacy_fingerprint = _box_fingerprint(
+        root, base_box, version, legacy_ssh_config=True
+    )
     scenarios = [*Scenarios(root).all(), *Scenarios(root, "escapes").all()]
+    _validate_scenario_ssh_ports(scenarios)
     expected_scenarios = {scenario_key(item): SNAPSHOT_NAME for item in scenarios}
     locks_directory = root / ".locks"
     locks_directory.mkdir(exist_ok=True)
@@ -534,13 +583,17 @@ def init_benchmark(
         ),
     ):
         previous = _read_previous_state(state_path)
-        reuse_box = not force and _can_reuse_box(previous, fingerprint, name, output)
+        reuse_box = not force and (
+            _can_reuse_box(previous, fingerprint, name, output)
+            or _can_reuse_box(previous, legacy_fingerprint, name, output)
+        )
         stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S-%f")
         snapshot = SNAPSHOT_NAME
         previous_generation = previous.get("generation")
         previous_box_name = previous.get("box")
         reuse_scenarios = (
             reuse_box
+            and previous.get("fingerprint") == fingerprint
             and previous.get("scenarios") == expected_scenarios
             and isinstance(previous_generation, str)
             and all(

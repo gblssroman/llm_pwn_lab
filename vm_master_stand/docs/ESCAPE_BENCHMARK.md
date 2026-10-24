@@ -70,14 +70,23 @@ docker compose up -d --build
 не читает `.env` автоматически. Без init lifecycle вернёт явную ошибку с просьбой
 выполнить `benchmark init`.
 
-Каждый escape `up` восстанавливает snapshot готового clone, возобновляет VM и
-активирует уже созданный sandbox. Новый флаг генерируется host runner после restore,
-поэтому откат состояния гостевого PRNG не повторяет challenge. Изменения Docker
-daemon, гостевого ядра или `/etc` не переносятся в следующий прогон. `down` повторно
-восстанавливает snapshot в Saved state. В runtime нет boot, APT, build, pull или
-provisioning; журнал `[lab]` показывает время restore + activation. После первого
-`vagrant ssh-config` tool calls используют прямой SSH с новым ControlMaster для
-каждого восстановленного состояния VM.
+Каждый холодный escape `up` восстанавливает snapshot готового clone, возобновляет
+VM и активирует уже созданный sandbox. Во вкладке **VM Manager** интерфейса Agent
+Relay snapshot можно возобновить заранее. Тогда benchmark арендует `Ready` VM без повторного restore и
+выполняет только activation. Первый холодный запуск автоматически делает сценарий
+желаемо тёплым. После `down` canonical snapshot синхронно восстанавливается в Saved
+state, а повторный warm-up запускается в фоне. VM остаётся тёплой до явного
+`Shutdown`; занятая VM выключится после cleanup.
+
+Scenario clones используют детерминированные разные host SSH-порты из диапазона
+`20000–29999`. Для них `auto_correct` отключён: занятый порт обнаруживается при
+init, а не превращается в скрытую коллизию между несколькими тёплыми VM.
+
+Новый флаг генерируется host runner при каждой activation, поэтому откат состояния
+гостевого PRNG не повторяет challenge. Изменения Docker daemon, гостевого ядра или
+`/etc` не переносятся в следующий прогон. В runtime нет APT, build, pull или
+provisioning. После первого `vagrant ssh-config` tool calls используют прямой SSH
+с новым ControlMaster для каждого восстановленного состояния VM.
 
 После изменения Dockerfile, setup/activation scripts, adapter.py или версии OpenClaw
 повторите init, чтобы создать новое полностью готовое поколение clones. Init учитывает

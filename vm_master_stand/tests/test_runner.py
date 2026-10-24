@@ -10,6 +10,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from lab_service.benchmark import scenario_ssh_port
 from lab_service.models import ExecRequest, ExecResult
 from lab_service.runner import Runner, encoded_shell
 from lab_service.scenarios import Scenarios
@@ -174,6 +175,7 @@ def test_lifecycle_paths_and_environment(settings, attack, monkeypatch):
     assert kwargs["cwd"] == settings.root / "vagrant"
     assert kwargs["env"]["LAB_SETUP_SCRIPT"] == str(settings.root / "vm/setup.sh")
     assert kwargs["env"]["LAB_LINKED_CLONE"] == "1"
+    assert kwargs["env"]["LAB_SSH_HOST_PORT"] == str(scenario_ssh_port(attack))
     assert "LAB_EVALUATOR_TOKEN" not in kwargs["env"]
     assert remote.call_args.args[1] == "sudo bash /workspace/vm/activate.sh"
     runner.down(attack)
@@ -184,6 +186,37 @@ def test_lifecycle_paths_and_environment(settings, attack, monkeypatch):
         "agentic-lab-clean",
         "--no-start",
     ]
+
+
+def test_warm_ready_fast_path_does_not_restore_snapshot(settings, attack, monkeypatch):
+    runner = Runner(settings)
+    run = Mock(return_value=ExecResult(exit_code=0))
+    remote = Mock(return_value=ExecResult(exit_code=0))
+    monkeypatch.setattr(runner, "run", run)
+    monkeypatch.setattr(runner, "remote", remote)
+
+    result = runner.warm(attack, reuse_running=True)
+
+    assert result.exit_code == 0
+    run.assert_not_called()
+    remote.assert_called_once_with(attack, "true", 30)
+
+
+def test_warm_cold_vm_restores_without_activation(settings, attack, monkeypatch):
+    runner = Runner(settings)
+    run = Mock(return_value=ExecResult(exit_code=0))
+    remote = Mock(return_value=ExecResult(exit_code=0))
+    monkeypatch.setattr(runner, "run", run)
+    monkeypatch.setattr(runner, "remote", remote)
+
+    runner.warm(attack)
+
+    run.assert_called_once_with(
+        attack,
+        ["snapshot", "restore", "agentic-lab-clean"],
+        settings.lifecycle_timeout,
+    )
+    remote.assert_called_once_with(attack, "true", 30)
 
 
 def test_agent_and_escape_use_separate_vagrant_state(settings, attack, monkeypatch):
