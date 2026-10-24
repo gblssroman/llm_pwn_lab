@@ -27,7 +27,8 @@ def test_frontend_and_empty_history_are_served(tmp_path) -> None:
         history = client.get("/v1/conversations")
 
     assert frontend.status_code == 200
-    assert "Agent Relay" in frontend.text
+    assert "Agent PWN Lab" in frontend.text
+    assert "Agent Relay" not in frontend.text
     assert 'id="agent-relay-tab"' in frontend.text
     assert 'id="vm-manager-tab"' in frontend.text
     assert 'id="vm-manager-view"' in frontend.text
@@ -80,6 +81,9 @@ def test_frontend_and_empty_history_are_served(tmp_path) -> None:
     assert 'name="task_prompt"' not in frontend.text
     assert "system-dot" not in frontend.text
     assert "Backend status" in frontend.text
+    assert "Made by" in frontend.text
+    assert "https://github.com/gblssroman" in frontend.text
+    assert "https://github.com/redrumerr" in frontend.text
     assert 'id="database-status"' in frontend.text
     assert 'id="langfuse-status"' in frontend.text
     assert "database-label" not in frontend.text
