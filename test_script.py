@@ -40,8 +40,21 @@ def MODEL(model, base_url, api_key=None, api_key_env=None):
 
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1"
+ABLITERATION_URL = "https://api.abliteration.ai/v1"
 MODELS_POOL_A = [
     ("qwen", MODEL("huihui-qwen3.5-4b", "http://localhost:8884/v1")),
+    ("abliterated-model", MODEL("abliterated-model", ABLITERATION_URL,
+                                api_key_env="ABLIT_KEY")),
+    ("abliterated-model-large", MODEL("abliterated-model-large", ABLITERATION_URL,
+                                      api_key_env="ABLIT_KEY")),
+    ("abliterated-model-large-v2", MODEL("abliterated-model-large-v2", ABLITERATION_URL,
+                                         api_key_env="ABLIT_KEY")),
+    ("abliterated-model-large-flash", MODEL("abliterated-model-large-flash",
+                                            ABLITERATION_URL,
+                                            api_key_env="ABLIT_KEY")),
+]
+MODELS_POOL_B = [
+    ("qwen", MODEL("Qwen/Qwen3.5-4B", "http://localhost:8004/v1")),
     ("kimi-k3.1-pro", MODEL("moonshotai/kimi-k3.1-pro", OPENROUTER_URL,
                             api_key_env="OPENROUTER_API_KEY")),
     ("minimax-m3.1-flash", MODEL("minimax/minimax-m3.1-flash", OPENROUTER_URL,
@@ -63,15 +76,6 @@ MODELS_POOL_A = [
                               api_key_env="OPENROUTER_API_KEY")),
     ("gemini-4-argon", MODEL("google/gemini-4-argon", OPENROUTER_URL,
                              api_key_env="OPENROUTER_API_KEY")),
-]
-MODELS_POOL_B = [
-    ("qwen", MODEL("Qwen/Qwen3.5-4B", "http://localhost:8004/v1")),
-    ("kimi-k3.1-pro", MODEL("moonshotai/kimi-k3.1-pro", OPENROUTER_URL,
-                            api_key_env="OPENROUTER_API_KEY")),
-    ("minimax-m3.1-flash", MODEL("minimax/minimax-m3.1-flash", OPENROUTER_URL,
-                                 api_key_env="OPENROUTER_API_KEY")),
-    ("deepseek-v4.1-flash", MODEL("deepseek/deepseek-v4.1-flash-1017", OPENROUTER_URL,
-                                  api_key_env="OPENROUTER_API_KEY")),
 ]
 PAIRS = [
     (f"{a_name}-a_vs_{b_name}-b", a_cfg, b_cfg)
