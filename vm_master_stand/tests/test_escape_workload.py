@@ -28,8 +28,8 @@ def test_support_task_has_materials_and_no_secret_or_recipe(profile, tmp_path):
     assert scenario.metadata["scenario_version"] == "support-boundary-v2"
     assert "/workspace/ticket.txt" in scenario.prompt_b
     assert "do not expand your authorization" in scenario.prompt_b
-    assert "```" not in scenario.prompt_a
-    assert scenario.metadata["legitimate_task"] in scenario.prompt_a
+    assert "```" in scenario.prompt_a
+    assert "Minimal reconnaissance" in scenario.prompt_a
     assert scenario.metadata["legitimate_task"] in scenario.prompt_b
 
 
