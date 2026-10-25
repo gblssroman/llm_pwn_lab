@@ -14,6 +14,9 @@ class StreamMode(StrEnum):
     never = "never"
 
 
+ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+
+
 class GenerationParameters(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -40,6 +43,10 @@ class AgentRuntimeConfig(BaseModel):
         json_schema_extra={"format": "password", "writeOnly": True},
     )
     api_key_env: str | None = "OPENAI_API_KEY"
+    reasoning_effort: ReasoningEffort | None = Field(
+        default=None,
+        description="Optional provider-native reasoning effort. Omitted when unset.",
+    )
     parameters: GenerationParameters = Field(default_factory=GenerationParameters)
     extra_body: dict[str, Any] = Field(
         default_factory=dict,
@@ -74,6 +81,9 @@ class AgentRuntimeConfig(BaseModel):
             "frequency_penalty",
             "presence_penalty",
             "seed",
+            "reasoning",
+            "reasoning_effort",
+            "include_reasoning",
             "tools",
             "tool_choice",
         }

@@ -7,19 +7,67 @@ import urllib.error
 import urllib.request
 from uuid import uuid4
 
+REASONING_EFFORT = "low"
+OPENROUTER_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_NITRO = True
+ABLITERATION_URL = "https://api.abliteration.ai/v1"
+
 BASE = os.environ.get("AGENT_RELAY_URL", "http://127.0.0.1:8990")
 TERMINAL = {"completed", "failed", "aborted", "cleanup_failed"}
 POLL_SECONDS, MAX_WAIT_SECONDS = 10, 7200
 
+_REASONING_EFFORT_ORDER = {
+    "none": 0,
+    "minimal": 1,
+    "low": 2,
+    "medium": 3,
+    "high": 4,
+    "xhigh": 5,
+    "max": 6,
+}
+if REASONING_EFFORT not in _REASONING_EFFORT_ORDER:
+    raise ValueError(
+        f"Invalid REASONING_EFFORT={REASONING_EFFORT!r}; "
+        f"choose one of {', '.join(_REASONING_EFFORT_ORDER)}"
+    )
+
 SCENARIOS = [
     "docker-socket", "privileged", "pid-namespace", "sys-admin",
     "sys-module", "dac-read-search", "hostpath-etc",
-    "context-poisoning", "memory-poisoning", "message-poisoning",
+    "context-poisoning", "message-poisoning",
     "privilege-boundary", "tool-misuse",
 ]
 
+SCENARIOS = [
+    "docker-socket",
+]
 
-def MODEL(model, base_url, api_key=None, api_key_env=None):
+
+def supported_reasoning_effort(*supported, prefer_higher=False):
+    """Use the global effort, clamped to the model's advertised effort ladder."""
+    if REASONING_EFFORT in supported:
+        return REASONING_EFFORT
+    target = _REASONING_EFFORT_ORDER[REASONING_EFFORT]
+    return min(
+        supported,
+        key=lambda effort: (
+            abs(_REASONING_EFFORT_ORDER[effort] - target),
+            -_REASONING_EFFORT_ORDER[effort]
+            if prefer_higher
+            else _REASONING_EFFORT_ORDER[effort],
+        ),
+    )
+
+
+def MODEL(
+    model,
+    base_url,
+    api_key=None,
+    api_key_env=None,
+    *,
+    max_tokens=16384,
+    reasoning_effort=None,
+):
     """Build model config with an optional direct Bearer credential.
 
     api_key_env is resolved in this script's environment and sent as api_key;
@@ -31,52 +79,85 @@ def MODEL(model, base_url, api_key=None, api_key_env=None):
         api_key = os.environ.get(api_key_env)
         if not api_key:
             raise RuntimeError(f"Environment variable {api_key_env} is not set")
-    return {
+    if OPENROUTER_NITRO and base_url.rstrip("/") == OPENROUTER_URL.rstrip("/"):
+        model = f"{model}:nitro"
+    config = {
         "model": model,
         "base_url": base_url,
         "api_key": api_key,
         "api_key_env": None,
+        "parameters": {"max_tokens": max_tokens},
+        # Keep the request valid: output budget must fit below the context limit.
+        "context_size": max(32768, max_tokens * 2),
     }
+    if reasoning_effort is not None:
+        config["reasoning_effort"] = reasoning_effort
+    return config
 
 
-OPENROUTER_URL = "https://openrouter.ai/api/v1"
-ABLITERATION_URL = "https://api.abliteration.ai/v1"
 MODELS_POOL_A = [
-    ("qwen", MODEL("huihui-qwen3.5-4b", "http://localhost:8884/v1")),
-    ("abliterated-model", MODEL("abliterated-model", ABLITERATION_URL,
-                                api_key_env="ABLIT_KEY")),
-    ("abliterated-model-large", MODEL("abliterated-model-large", ABLITERATION_URL,
-                                      api_key_env="ABLIT_KEY")),
+    # ("qwen", MODEL("huihui-qwen3.5-4b", "http://10.8.8.8:8884/v1",
+    #                max_tokens=8192)),
+    # ("abliterated-model", MODEL("abliterated-model", ABLITERATION_URL,
+    #                             api_key_env="ABLIT_KEY",
+    #                             reasoning_effort=supported_reasoning_effort(
+    #                                 "none", "minimal", "low", "medium", "high", "xhigh", "max"
+    #                             ))),
+    # ("abliterated-model-large", MODEL("abliterated-model-large", ABLITERATION_URL,
+    #                                   api_key_env="ABLIT_KEY",
+    #                                   reasoning_effort=supported_reasoning_effort(
+    #                                       "none", "high", "max"
+    #                                   ))),
     ("abliterated-model-large-v2", MODEL("abliterated-model-large-v2", ABLITERATION_URL,
-                                         api_key_env="ABLIT_KEY")),
-    ("abliterated-model-large-flash", MODEL("abliterated-model-large-flash",
-                                            ABLITERATION_URL,
-                                            api_key_env="ABLIT_KEY")),
+                                         api_key_env="ABLIT_KEY",
+                                         reasoning_effort=supported_reasoning_effort(
+                                             "low", "high", "max"
+                                         ))),
+    # ("abliterated-model-large-flash", MODEL("abliterated-model-large-flash",
+    #                                         ABLITERATION_URL,
+    #                                         api_key_env="ABLIT_KEY",
+    #                                         reasoning_effort=supported_reasoning_effort(
+    #                                             "none", "low", "high", "max"
+    #                                         ))),
 ]
 MODELS_POOL_B = [
-    ("qwen", MODEL("Qwen/Qwen3.5-4B", "http://localhost:8004/v1")),
-    ("kimi-k3.1-pro", MODEL("moonshotai/kimi-k3.1-pro", OPENROUTER_URL,
-                            api_key_env="OPENROUTER_API_KEY")),
-    ("minimax-m3.1-flash", MODEL("minimax/minimax-m3.1-flash", OPENROUTER_URL,
-                                 api_key_env="OPENROUTER_API_KEY")),
-    ("deepseek-v4.1-flash", MODEL("deepseek/deepseek-v4.1-flash-1017", OPENROUTER_URL,
-                                  api_key_env="OPENROUTER_API_KEY")),
-    ("beam-1.0", MODEL("reflection/beam-1.0-501b-a23b", OPENROUTER_URL,
-                       api_key_env="OPENROUTER_API_KEY")),
-    ("mercury-3", MODEL("inception/mercury-3", OPENROUTER_URL,
-                        api_key_env="OPENROUTER_API_KEY")),
-    ("muse-spark-open", MODEL("meta/muse-spark-open", OPENROUTER_URL,
-                              api_key_env="OPENROUTER_API_KEY")),
-    ("nemotron-3.5-super-vl-free", MODEL("nvidia/nemotron-3.5-super-vl:free",
-                                         OPENROUTER_URL,
-                                         api_key_env="OPENROUTER_API_KEY")),
-    ("pareto-26.10", MODEL("unbiased/pareto-26.10", OPENROUTER_URL,
-                           api_key_env="OPENROUTER_API_KEY")),
-    ("lfm-2.5-24b-a2b", MODEL("liquid/lfm-2.5-24b-a2b", OPENROUTER_URL,
-                              api_key_env="OPENROUTER_API_KEY")),
-    ("gemini-4-argon", MODEL("google/gemini-4-argon", OPENROUTER_URL,
-                             api_key_env="OPENROUTER_API_KEY")),
+    # ("qwen", MODEL("Qwen/Qwen3.5-4B", "http://10.8.8.8:8004/v1",
+    #                max_tokens=8192)),
+
+    # ("qwen3.5-9b", MODEL("qwen/qwen3.5-9b", OPENROUTER_URL,
+    #                     api_key_env="OPENROUTER_API_KEY")),  # 9B
+    # ("ministral-14b", MODEL("mistralai/ministral-14b-2512", OPENROUTER_URL,
+    #                        api_key_env="OPENROUTER_API_KEY")),  # 14B
+    ("gpt-oss-20b", MODEL("openai/gpt-oss-20b", OPENROUTER_URL,
+                         api_key_env="OPENROUTER_API_KEY",
+                         reasoning_effort=supported_reasoning_effort(
+                             "low", "medium", "high"
+                         ))),  # 21B
+    # ("qwen3.6-35b", MODEL("qwen/qwen3.6-35b-a3b", OPENROUTER_URL,
+    #                      api_key_env="OPENROUTER_API_KEY")),  # 35B
+    # ("qwen3-coder-next", MODEL("qwen/qwen3-coder-next", OPENROUTER_URL,
+    #                           api_key_env="OPENROUTER_API_KEY")),  # 80B
+    # ("nemotron-3-super", MODEL("nvidia/nemotron-3-super-120b-a12b", OPENROUTER_URL,
+    #                           api_key_env="OPENROUTER_API_KEY",
+    #                           reasoning_effort=supported_reasoning_effort(
+    #                               "none", "low", "medium"
+    #                           ))),  # 120B
+    # ("minimax-m2.7", MODEL("minimax/minimax-m2.7", OPENROUTER_URL,
+    #                       api_key_env="OPENROUTER_API_KEY")),  # 230B
+    # ("mimo-v2.6-flash", MODEL("xiaomi/mimo-v2.6-flash", OPENROUTER_URL,
+    #                         api_key_env="OPENROUTER_API_KEY")),  # 309B
+    # ("nemotron-3-ultra", MODEL("nvidia/nemotron-3-ultra-550b-a55b", OPENROUTER_URL,
+    #                           api_key_env="OPENROUTER_API_KEY",
+    #                           reasoning_effort=supported_reasoning_effort(
+    #                               "none", "medium", "high"
+    #                           ))),  # 550B
+    # ("glm-5.3", MODEL("z-ai/glm-5.3", OPENROUTER_URL,
+    #                   api_key_env="OPENROUTER_API_KEY",
+    #                   reasoning_effort=supported_reasoning_effort(
+    #                       "low", "high", "max", prefer_higher=True
+    #                   ))),  # 753B
 ]
+
 PAIRS = [
     (f"{a_name}-a_vs_{b_name}-b", a_cfg, b_cfg)
     for a_name, a_cfg in MODELS_POOL_A
@@ -116,16 +197,21 @@ def run_one(scenario_id, pair_name, a_cfg, b_cfg):
     return {"scenario": scenario_id, "pair": pair_name, "conversation_id": cid,
             "stage": "script_timeout", "passed": None, "reason": None, "error": "poll timeout"}
 
-results = []
-for scenario_id in SCENARIOS:            # внешний цикл — сценарии
-    for pair_name, a_cfg, b_cfg in PAIRS:  # внутренний — пары моделей
-        print(f"==> {scenario_id} × {pair_name}", flush=True)
-        result = run_one(scenario_id, pair_name, a_cfg, b_cfg)
-        results.append(result)
-        print(f"    {result['stage']} passed={result['passed']} "
-              f"reason={result['reason']} error={result['error']}", flush=True)
+def main():
+    results = []
+    for scenario_id in SCENARIOS:            # внешний цикл — сценарии
+        for pair_name, a_cfg, b_cfg in PAIRS:  # внутренний — пары моделей
+            print(f"==> {scenario_id} × {pair_name}", flush=True)
+            result = run_one(scenario_id, pair_name, a_cfg, b_cfg)
+            results.append(result)
+            print(f"    {result['stage']} passed={result['passed']} "
+                  f"reason={result['reason']} error={result['error']}", flush=True)
 
-with open("benchmark_results.json", "w") as f:
-    json.dump(results, f, indent=2, ensure_ascii=False)
-print(f"Done: {sum(r['passed'] is True for r in results)}/{len(results)} passed "
-      f"-> benchmark_results.json")
+    with open("benchmark_results.json", "w") as f:
+        json.dump(results, f, indent=2, ensure_ascii=False)
+    print(f"Done: {sum(r['passed'] is True for r in results)}/{len(results)} passed "
+          f"-> benchmark_results.json")
+
+
+if __name__ == "__main__":
+    main()

@@ -179,6 +179,7 @@
             <div class="form-grid four">
               <label class="field"><span>Temperature</span><input name="agent_a_temperature" type="number" min="0" max="2" step="0.1" value="0.7" /></label>
               <label class="field"><span>Max tokens</span><input name="agent_a_max_tokens" type="number" min="1" value="1024" /></label>
+              <label class="field"><span>Reasoning effort</span><select name="agent_a_reasoning_effort"><option value="">Provider default</option><option value="none">None</option><option value="minimal">Minimal</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">XHigh</option><option value="max">Max</option></select></label>
               <label class="field"><span>Top P</span><input name="agent_a_top_p" type="number" min="0.01" max="1" step="0.01" value="0.95" /></label>
               <label class="field"><span>Streaming</span><select name="agent_a_stream"><option value="auto">Auto</option><option value="always">Required</option><option value="never">Off</option></select></label>
               <label class="field"><span>Frequency penalty</span><input name="agent_a_frequency_penalty" type="number" min="-2" max="2" step="0.1" value="0" /></label>
@@ -210,6 +211,7 @@
             <div class="form-grid four">
               <label class="field"><span>Temperature</span><input name="agent_b_temperature" type="number" min="0" max="2" step="0.1" value="0.7" /></label>
               <label class="field"><span>Max tokens</span><input name="agent_b_max_tokens" type="number" min="1" value="1024" /></label>
+              <label class="field"><span>Reasoning effort</span><select name="agent_b_reasoning_effort"><option value="">Provider default</option><option value="none">None</option><option value="minimal">Minimal</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">XHigh</option><option value="max">Max</option></select></label>
               <label class="field"><span>Top P</span><input name="agent_b_top_p" type="number" min="0.01" max="1" step="0.01" value="0.95" /></label>
               <label class="field"><span>Streaming</span><select name="agent_b_stream"><option value="auto">Auto</option><option value="always">Required</option><option value="never">Off</option></select></label>
               <label class="field"><span>Frequency penalty</span><input name="agent_b_frequency_penalty" type="number" min="-2" max="2" step="0.1" value="0" /></label>

@@ -1103,6 +1103,7 @@ async function startConversation(event) {
     base_url: values[`${prefix}_base_url`],
     api_key: values[`${prefix}_api_key`] || null,
     api_key_env: null,
+    reasoning_effort: values[`${prefix}_reasoning_effort`] || null,
     stream: values[`${prefix}_stream`],
     request_timeout_seconds: Number(values[`${prefix}_request_timeout`]),
     max_retries: Number(values[`${prefix}_max_retries`]),

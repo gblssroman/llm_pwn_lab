@@ -557,6 +557,7 @@ class ConversationRunner:
                         },
                         tools=tools,
                         tool_choice="auto" if tools else None,
+                        preserve_reasoning_details=True,
                     )
 
                 async def execute_terminal(call: ToolCall, ordinal: int) -> dict[str, Any]:
@@ -605,6 +606,7 @@ class ConversationRunner:
         on_token: Any | None = None,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
+        preserve_reasoning_details: bool = False,
     ) -> LLMResult:
         parameters = config.parameters.to_openai_payload()
         if parameter_overrides:
@@ -612,7 +614,10 @@ class ConversationRunner:
         with self._tracing.generation(
             name=name,
             model=config.model,
-            messages=messages,
+            messages=[
+                {key: value for key, value in message.items() if key != "reasoning_details"}
+                for message in messages
+            ],
             parameters=parameters,
             metadata=metadata,
         ) as observation:
@@ -626,6 +631,8 @@ class ConversationRunner:
                 }
                 if tools is not None:
                     completion_kwargs.update(tools=tools, tool_choice=tool_choice)
+                if preserve_reasoning_details:
+                    completion_kwargs["preserve_reasoning_details"] = True
                 result = await self._llm.complete(**completion_kwargs)
             except Exception as exc:
                 self._tracing.fail(observation, exc)

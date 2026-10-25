@@ -29,6 +29,9 @@ async def test_streaming_completion_collects_sse_and_usage() -> None:
         assert body["stream"] is True
         content = "".join(
             [
+                'data: {"id":"r1","choices":[{"delta":{"reasoning":"private",'
+                '"reasoning_content":"private too","reasoning_details":[]},'
+                '"finish_reason":null}]}\n\n',
                 'data: {"id":"r1","choices":[{"delta":{"content":"hel"},'
                 '"finish_reason":null}]}\n\n',
                 'data: {"id":"r1","choices":[{"delta":{"content":"lo"},'
@@ -64,8 +67,127 @@ async def test_streaming_completion_collects_sse_and_usage() -> None:
     assert result.prompt_tokens == 8
     assert result.completion_tokens == 2
     assert result.finish_reason == "stop"
+    assert result.reasoning_details == []
     assert starts == 1
     assert deltas == ["hel", "lo"]
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_reasoning_effort_uses_top_level_field_and_reasoning_is_discarded() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["reasoning_effort"] == "low"
+        assert "reasoning" not in body
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": "final answer",
+                            "reasoning": "private chain of thought",
+                            "reasoning_content": "private chain of thought",
+                            "reasoning_details": [{"type": "reasoning.text", "text": "private"}],
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {},
+            },
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = OpenAICompatibleClient(http)
+    agent = config(StreamMode.never).model_copy(update={"reasoning_effort": "low"})
+
+    result = await client.complete(config=agent, messages=[{"role": "user", "content": "hi"}])
+
+    assert result.content == "final answer"
+    assert "reasoning" not in result.metadata
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_openrouter_excludes_reasoning_from_response() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["reasoning"] == {"exclude": True, "effort": "low"}
+        assert "reasoning_effort" not in body
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "final answer"}, "finish_reason": "stop"}],
+                "usage": {},
+            },
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = OpenAICompatibleClient(http)
+    agent = AgentConfig.model_validate(
+        {
+            **config(StreamMode.never).model_dump(),
+            "base_url": "https://openrouter.ai/api/v1",
+            "reasoning_effort": "low",
+        }
+    )
+
+    result = await client.complete(config=agent, messages=[{"role": "user", "content": "hi"}])
+
+    assert result.content == "final answer"
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_openrouter_preserves_reasoning_details_only_when_requested() -> None:
+    details = [{"type": "reasoning.text", "text": "private", "index": 0}]
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["reasoning"] == {"exclude": False, "effort": "low"}
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": "",
+                            "reasoning": "private",
+                            "reasoning_details": details,
+                            "tool_calls": [
+                                {
+                                    "id": "call-1",
+                                    "type": "function",
+                                    "function": {"name": "terminal", "arguments": "{}"},
+                                }
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "usage": {},
+            },
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = OpenAICompatibleClient(http)
+    agent = AgentConfig.model_validate(
+        {
+            **config(StreamMode.never).model_dump(),
+            "base_url": "https://openrouter.ai/api/v1",
+            "reasoning_effort": "low",
+        }
+    )
+
+    result = await client.complete(
+        config=agent,
+        messages=[{"role": "user", "content": "hi"}],
+        preserve_reasoning_details=True,
+    )
+
+    assert result.reasoning_details == details
+    assert result.content == ""
+    assert [call.id for call in result.tool_calls] == ["call-1"]
     await http.aclose()
 
 
@@ -154,6 +276,40 @@ async def test_streaming_retries_without_optional_usage_extension() -> None:
     assert second.streamed is True
     assert second.attempts == 1
     assert ["stream_options" in payload for payload in payloads] == [True, False, False]
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_empty_stream_falls_back_directly_to_non_stream() -> None:
+    calls: list[bool] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        calls.append(body["stream"])
+        if body["stream"]:
+            content = (
+                'data: {"choices":[{"delta":{"reasoning":"private"},'
+                '"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
+            )
+            return httpx.Response(
+                200, text=content, headers={"content-type": "text/event-stream"}
+            )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "fallback"}, "finish_reason": "stop"}],
+                "usage": {},
+            },
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = OpenAICompatibleClient(http)
+    result = await client.complete(config=config(), messages=[{"role": "user", "content": "hi"}])
+
+    assert calls == [True, False]
+    assert result.content == "fallback"
+    assert result.streamed is False
+    assert result.attempts == 2
     await http.aclose()
 
 

@@ -60,6 +60,10 @@ class ReactState(TypedDict, total=False):
 
 def _assistant_message(result: LLMResult) -> dict[str, Any]:
     message: dict[str, Any] = {"role": "assistant", "content": result.content or None}
+    if result.reasoning_details:
+        # OpenRouter requires these opaque blocks to be replayed unchanged while
+        # continuing the same tool-call sequence. _aggregate deliberately drops them.
+        message["reasoning_details"] = result.reasoning_details
     if result.tool_calls:
         message["tool_calls"] = [
             {

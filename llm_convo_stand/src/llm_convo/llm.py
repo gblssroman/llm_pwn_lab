@@ -31,6 +31,10 @@ class StreamUnsupportedError(LLMError):
     pass
 
 
+class EmptyStreamError(StreamUnsupportedError):
+    pass
+
+
 def _describe_error(error: Exception) -> str:
     detail = str(error).strip()
     if not detail:
@@ -63,6 +67,9 @@ class LLMResult:
     attempts: int
     metadata: dict[str, Any] = field(default_factory=dict)
     tool_calls: list[ToolCall] = field(default_factory=list)
+    # Kept only long enough to continue one provider tool-call sequence. Callers
+    # must not persist, display, trace, or share these details with another agent.
+    reasoning_details: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _api_key(config: AgentConfig) -> str | None:
@@ -79,6 +86,21 @@ def _headers(config: AgentConfig) -> dict[str, str]:
     if key:
         headers["Authorization"] = f"Bearer {key}"
     return headers
+
+
+def _reasoning_request(
+    config: AgentConfig, *, preserve_reasoning_details: bool = False
+) -> dict[str, Any]:
+    """Build provider controls, disclosing reasoning only for an active tool loop."""
+    host = (config.base_url.host or "").lower()
+    if host == "openrouter.ai" or host.endswith(".openrouter.ai"):
+        reasoning: dict[str, Any] = {"exclude": not preserve_reasoning_details}
+        if config.reasoning_effort is not None:
+            reasoning["effort"] = config.reasoning_effort
+        return {"reasoning": reasoning}
+    if config.reasoning_effort is not None:
+        return {"reasoning_effort": config.reasoning_effort}
+    return {}
 
 
 def _error_message(response: httpx.Response) -> str:
@@ -129,6 +151,14 @@ def _parse_tool_calls(value: Any) -> list[ToolCall]:
     return result
 
 
+def _parse_reasoning_details(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+        raise LLMError("LLM endpoint returned malformed reasoning details")
+    return [dict(item) for item in value]
+
+
 class OpenAICompatibleClient:
     def __init__(self, client: httpx.AsyncClient | None = None) -> None:
         self._client = client or httpx.AsyncClient()
@@ -150,6 +180,7 @@ class OpenAICompatibleClient:
         on_token: TokenCallback | None = None,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
+        preserve_reasoning_details: bool = False,
     ) -> LLMResult:
         parameters = config.parameters.to_openai_payload()
         if parameter_overrides:
@@ -158,6 +189,9 @@ class OpenAICompatibleClient:
             "model": config.model,
             "messages": messages,
             **parameters,
+            **_reasoning_request(
+                config, preserve_reasoning_details=preserve_reasoning_details
+            ),
             **config.extra_body,
         }
         if tools:
@@ -182,6 +216,16 @@ class OpenAICompatibleClient:
                             include_usage=include_usage,
                             on_stream_start=on_stream_start,
                             on_token=on_token,
+                            preserve_reasoning_details=preserve_reasoning_details,
+                        )
+                    except EmptyStreamError as empty_stream_error:
+                        attempts += 1
+                        result = await self._fallback_to_non_stream(
+                            config=config,
+                            base_payload=base_payload,
+                            error=empty_stream_error,
+                            attempts_so_far=attempts,
+                            preserve_reasoning_details=preserve_reasoning_details,
                         )
                     except StreamUnsupportedError as first_stream_error:
                         if include_usage:
@@ -203,9 +247,20 @@ class OpenAICompatibleClient:
                                     include_usage=False,
                                     on_stream_start=on_stream_start,
                                     on_token=on_token,
+                                    preserve_reasoning_details=preserve_reasoning_details,
                                 )
                                 self._stream_usage_capability[capability_key] = False
                                 self._stream_capability[capability_key] = True
+                            except EmptyStreamError as empty_stream_error:
+                                self._stream_usage_capability[capability_key] = False
+                                attempts += 1
+                                result = await self._fallback_to_non_stream(
+                                    config=config,
+                                    base_payload=base_payload,
+                                    error=empty_stream_error,
+                                    attempts_so_far=attempts,
+                                    preserve_reasoning_details=preserve_reasoning_details,
+                                )
                             except StreamUnsupportedError as stream_error:
                                 attempts += 1
                                 result = await self._fallback_to_non_stream(
@@ -213,6 +268,7 @@ class OpenAICompatibleClient:
                                     base_payload=base_payload,
                                     error=stream_error,
                                     attempts_so_far=attempts,
+                                    preserve_reasoning_details=preserve_reasoning_details,
                                 )
                                 self._stream_capability[capability_key] = False
                         else:
@@ -222,13 +278,18 @@ class OpenAICompatibleClient:
                                 base_payload=base_payload,
                                 error=first_stream_error,
                                 attempts_so_far=attempts,
+                                preserve_reasoning_details=preserve_reasoning_details,
                             )
                             self._stream_capability[capability_key] = False
                     else:
                         self._stream_capability[capability_key] = True
                 else:
                     attempts += 1
-                    result = await self._non_stream(config, base_payload)
+                    result = await self._non_stream(
+                        config,
+                        base_payload,
+                        preserve_reasoning_details=preserve_reasoning_details,
+                    )
                 result.attempts = attempts
                 return result
             except (RetryableLLMError, httpx.TimeoutException, httpx.NetworkError) as exc:
@@ -262,6 +323,7 @@ class OpenAICompatibleClient:
         base_payload: dict[str, Any],
         error: StreamUnsupportedError,
         attempts_so_far: int,
+        preserve_reasoning_details: bool,
     ) -> LLMResult:
         if config.stream is StreamMode.always:
             raise error
@@ -274,9 +336,19 @@ class OpenAICompatibleClient:
             request_attempts=attempts_so_far,
             error=str(error),
         )
-        return await self._non_stream(config, base_payload)
+        return await self._non_stream(
+            config,
+            base_payload,
+            preserve_reasoning_details=preserve_reasoning_details,
+        )
 
-    async def _non_stream(self, config: AgentConfig, base_payload: dict[str, Any]) -> LLMResult:
+    async def _non_stream(
+        self,
+        config: AgentConfig,
+        base_payload: dict[str, Any],
+        *,
+        preserve_reasoning_details: bool,
+    ) -> LLMResult:
         started = time.perf_counter()
         response = await self._client.post(
             f"{str(config.base_url).rstrip('/')}/chat/completions",
@@ -291,6 +363,11 @@ class OpenAICompatibleClient:
             message = choice["message"]
             content = message.get("content") or ""
             tool_calls = _parse_tool_calls(message.get("tool_calls"))
+            reasoning_details = (
+                _parse_reasoning_details(message.get("reasoning_details"))
+                if preserve_reasoning_details
+                else []
+            )
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             raise LLMError("Malformed non-streaming response from LLM endpoint") from exc
         if not isinstance(content, str):
@@ -311,6 +388,7 @@ class OpenAICompatibleClient:
             attempts=1,
             metadata={"response_id": data.get("id"), "created": data.get("created")},
             tool_calls=tool_calls,
+            reasoning_details=reasoning_details,
         )
 
     async def _stream(
@@ -321,11 +399,13 @@ class OpenAICompatibleClient:
         include_usage: bool = True,
         on_stream_start: AsyncCallback | None = None,
         on_token: TokenCallback | None = None,
+        preserve_reasoning_details: bool = False,
     ) -> LLMResult:
         started = time.perf_counter()
         first_token_ms: int | None = None
         chunks: list[str] = []
         tool_fragments: dict[int, dict[str, Any]] = {}
+        reasoning_details: list[dict[str, Any]] = []
         usage: dict[str, Any] = {}
         finish_reason: str | None = None
         response_id: str | None = None
@@ -374,6 +454,12 @@ class OpenAICompatibleClient:
                     continue
                 choice = choices[0]
                 delta = choice.get("delta") or {}
+                # Plain reasoning text is always ignored. Structured details are
+                # retained only when the caller is continuing this exact tool loop.
+                if preserve_reasoning_details:
+                    reasoning_details.extend(
+                        _parse_reasoning_details(delta.get("reasoning_details"))
+                    )
                 for fragment in delta.get("tool_calls") or []:
                     if not isinstance(fragment, dict):
                         raise LLMError("Malformed streaming tool call")
@@ -415,7 +501,7 @@ class OpenAICompatibleClient:
         raw_tool_calls = [tool_fragments[index] for index in sorted(tool_fragments)]
         tool_calls = _parse_tool_calls(raw_tool_calls)
         if not chunks and not tool_calls:
-            raise LLMError("Streaming response ended without text or tool calls")
+            raise EmptyStreamError("Streaming response ended without text or tool calls")
         return LLMResult(
             content="".join(chunks),
             prompt_tokens=usage.get("prompt_tokens"),
@@ -428,4 +514,5 @@ class OpenAICompatibleClient:
             attempts=1,
             metadata={"response_id": response_id},
             tool_calls=tool_calls,
+            reasoning_details=reasoning_details,
         )

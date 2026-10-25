@@ -27,3 +27,5 @@ vm_master_stand/.cache/
 vm_master_stand/.runtime/
 
 pyrightconfig.json
+benchmark_run.log
+benchmark_results.json
