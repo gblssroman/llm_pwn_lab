@@ -40,31 +40,38 @@ def MODEL(model, base_url, api_key=None, api_key_env=None):
 
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1"
-OPENROUTER_MODELS = [
-    ("kimi-k3.1-pro", "moonshotai/kimi-k3.1-pro"),
-    ("minimax-m3.1-flash", "minimax/minimax-m3.1-flash"),
-    ("deepseek-v4.1-flash", "deepseek/deepseek-v4.1-flash-1017"),
-    ("beam-1.0", "reflection/beam-1.0-501b-a23b"),
-    ("mercury-3", "inception/mercury-3"),
-    ("muse-spark-open", "meta/muse-spark-open"),
-    ("nemotron-3.5-super-vl-free", "nvidia/nemotron-3.5-super-vl:free"),
-    ("pareto-26.10", "unbiased/pareto-26.10"),
-    ("lfm-2.5-24b-a2b", "liquid/lfm-2.5-24b-a2b"),
-    ("gemini-4-argon", "google/gemini-4-argon"),
-]
-
-
-def OPENROUTER(model):
-    return MODEL(model, OPENROUTER_URL, api_key_env="OPENROUTER_API_KEY")
-
-
 MODELS_POOL_A = [
-    ("qwen", MODEL("Qwen/Qwen3.5-4B", "http://localhost:8884/v1")),
-    *[(name, OPENROUTER(model)) for name, model in OPENROUTER_MODELS[:3]],
+    ("qwen", MODEL("huihui-qwen3.5-4b", "http://localhost:8884/v1")),
+    ("kimi-k3.1-pro", MODEL("moonshotai/kimi-k3.1-pro", OPENROUTER_URL,
+                            api_key_env="OPENROUTER_API_KEY")),
+    ("minimax-m3.1-flash", MODEL("minimax/minimax-m3.1-flash", OPENROUTER_URL,
+                                 api_key_env="OPENROUTER_API_KEY")),
+    ("deepseek-v4.1-flash", MODEL("deepseek/deepseek-v4.1-flash-1017", OPENROUTER_URL,
+                                  api_key_env="OPENROUTER_API_KEY")),
+    ("beam-1.0", MODEL("reflection/beam-1.0-501b-a23b", OPENROUTER_URL,
+                       api_key_env="OPENROUTER_API_KEY")),
+    ("mercury-3", MODEL("inception/mercury-3", OPENROUTER_URL,
+                        api_key_env="OPENROUTER_API_KEY")),
+    ("muse-spark-open", MODEL("meta/muse-spark-open", OPENROUTER_URL,
+                              api_key_env="OPENROUTER_API_KEY")),
+    ("nemotron-3.5-super-vl-free", MODEL("nvidia/nemotron-3.5-super-vl:free",
+                                         OPENROUTER_URL,
+                                         api_key_env="OPENROUTER_API_KEY")),
+    ("pareto-26.10", MODEL("unbiased/pareto-26.10", OPENROUTER_URL,
+                           api_key_env="OPENROUTER_API_KEY")),
+    ("lfm-2.5-24b-a2b", MODEL("liquid/lfm-2.5-24b-a2b", OPENROUTER_URL,
+                              api_key_env="OPENROUTER_API_KEY")),
+    ("gemini-4-argon", MODEL("google/gemini-4-argon", OPENROUTER_URL,
+                             api_key_env="OPENROUTER_API_KEY")),
 ]
 MODELS_POOL_B = [
     ("qwen", MODEL("Qwen/Qwen3.5-4B", "http://localhost:8004/v1")),
-    *[(name, OPENROUTER(model)) for name, model in OPENROUTER_MODELS],
+    ("kimi-k3.1-pro", MODEL("moonshotai/kimi-k3.1-pro", OPENROUTER_URL,
+                            api_key_env="OPENROUTER_API_KEY")),
+    ("minimax-m3.1-flash", MODEL("minimax/minimax-m3.1-flash", OPENROUTER_URL,
+                                 api_key_env="OPENROUTER_API_KEY")),
+    ("deepseek-v4.1-flash", MODEL("deepseek/deepseek-v4.1-flash-1017", OPENROUTER_URL,
+                                  api_key_env="OPENROUTER_API_KEY")),
 ]
 PAIRS = [
     (f"{a_name}-a_vs_{b_name}-b", a_cfg, b_cfg)
