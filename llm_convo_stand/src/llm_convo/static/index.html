@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="dark" />
     <title>Agent PWN Lab</title>
-    <link rel="stylesheet" href="/assets/app.css?v=branding-1" />
+    <link rel="stylesheet" href="/assets/app.css?v=bearer-auth-1" />
   </head>
   <body>
     <nav class="product-switch" aria-label="Workspace section">
@@ -173,6 +173,7 @@
             <label class="field"><span>OpenAI-compatible endpoint</span><input name="agent_a_base_url" type="url" required value="http://10.8.8.8:8004/v1" /></label>
             <label class="field"><span>Model</span><input name="agent_a_model" required value="Qwen/Qwen3.5-4B" /></label>
           </div>
+          <label class="field credential-field"><span>Bearer API key (optional)</span><input name="agent_a_api_key" type="password" autocomplete="new-password" placeholder="Not required for local endpoints" /></label>
           <details class="advanced">
             <summary>Generation and context settings</summary>
             <div class="form-grid four">
@@ -203,6 +204,7 @@
             <label class="field"><span>OpenAI-compatible endpoint</span><input name="agent_b_base_url" type="url" required value="http://10.8.8.8:8004/v1" /></label>
             <label class="field"><span>Model</span><input name="agent_b_model" required value="Qwen/Qwen3.5-4B" /></label>
           </div>
+          <label class="field credential-field"><span>Bearer API key (optional)</span><input name="agent_b_api_key" type="password" autocomplete="new-password" placeholder="Not required for local endpoints" /></label>
           <details class="advanced">
             <summary>Generation and context settings</summary>
             <div class="form-grid four">
@@ -248,6 +250,6 @@
 
     <div class="toast" id="toast"></div>
     <script src="/assets/markdown.js?v=vm-benchmark-1" defer></script>
-    <script src="/assets/app.js?v=vm-manager-2" defer></script>
+    <script src="/assets/app.js?v=bearer-auth-1" defer></script>
   </body>
 </html>

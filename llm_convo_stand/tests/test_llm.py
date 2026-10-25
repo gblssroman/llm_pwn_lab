@@ -70,6 +70,32 @@ async def test_streaming_completion_collects_sse_and_usage() -> None:
 
 
 @pytest.mark.asyncio
+async def test_direct_api_key_is_sent_as_bearer_and_overrides_environment(monkeypatch) -> None:
+    monkeypatch.setenv("PROVIDER_API_KEY", "environment-secret")
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Authorization"] == "Bearer direct-secret"
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+                "usage": {},
+            },
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = OpenAICompatibleClient(http)
+    agent = config(StreamMode.never).model_copy(
+        update={"api_key": "direct-secret", "api_key_env": "PROVIDER_API_KEY"}
+    )
+
+    result = await client.complete(config=agent, messages=[{"role": "user", "content": "hi"}])
+
+    assert result.content == "ok"
+    await http.aclose()
+
+
+@pytest.mark.asyncio
 async def test_auto_mode_falls_back_when_stream_is_unsupported() -> None:
     calls: list[bool] = []
 

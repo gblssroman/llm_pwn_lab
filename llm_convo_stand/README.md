@@ -50,10 +50,11 @@ uv run uvicorn llm_convo.api:app --host 0.0.0.0 --port 8080
 заменить миграциями.
 
 Тестовое API модели доступно по `http://10.8.8.8:8004/v1`, модель по умолчанию —
-`Qwen/Qwen3.5-4B`. Ключи не принимаются в теле запроса и не пишутся в БД:
-каждая роль указывает имя переменной окружения в `api_key_env`. Для локального
-vLLM без авторизации переменная может отсутствовать или `api_key_env` может быть
-`null`.
+`Qwen/Qwen3.5-4B`. Каждая роль может передать обычный Bearer credential напрямую в
+`api_key` или указать имя переменной окружения backend в `api_key_env`; прямой ключ
+имеет приоритет. Для локального vLLM оба поля могут быть `null`.
+Прямой ключ хранится в PostgreSQL для устойчивого queued/restart execution, но вырезается
+из conversation API, SSE, frontend и Langfuse metadata.
 
 Сервис пока не имеет входной авторизации и позволяет клиенту задавать `base_url`,
 поэтому его следует запускать только в доверенной сети и не публиковать наружу.
@@ -151,6 +152,7 @@ curl -sS http://localhost:8990/v1/conversations \
       "system_prompt": "Ты архитектор, защищающий event sourcing.",
       "model": "Qwen/Qwen3.5-4B",
       "base_url": "http://10.8.8.8:8004/v1",
+      "api_key": null,
       "api_key_env": null,
       "stream": "auto",
       "extra_body": {"chat_template_kwargs": {"enable_thinking": false}},
@@ -160,6 +162,7 @@ curl -sS http://localhost:8990/v1/conversations \
       "system_prompt": "Ты прагматичный ревьюер, ищущий риски и более простые варианты.",
       "model": "Qwen/Qwen3.5-4B",
       "base_url": "http://10.8.8.8:8004/v1",
+      "api_key": null,
       "api_key_env": null,
       "stream": "auto",
       "extra_body": {"chat_template_kwargs": {"enable_thinking": false}},

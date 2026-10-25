@@ -34,6 +34,11 @@ class AgentRuntimeConfig(BaseModel):
 
     model: str = Field(default="Qwen/Qwen3.5-4B", min_length=1)
     base_url: HttpUrl = "http://localhost:8004/v1"
+    api_key: str | None = Field(
+        default=None,
+        repr=False,
+        json_schema_extra={"format": "password", "writeOnly": True},
+    )
     api_key_env: str | None = "OPENAI_API_KEY"
     parameters: GenerationParameters = Field(default_factory=GenerationParameters)
     extra_body: dict[str, Any] = Field(

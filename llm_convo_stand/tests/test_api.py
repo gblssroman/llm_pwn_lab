@@ -2,7 +2,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from llm_convo.api import create_app
+from llm_convo.api import _public_config, create_app
 from llm_convo.config import Settings
 from llm_convo.schemas import VmPoolItem, VmScenario, VmScenarioSummary
 
@@ -36,6 +36,8 @@ def test_frontend_and_empty_history_are_served(tmp_path) -> None:
     assert "Shutdown all" in frontend.text
     assert 'name="agent_a_base_url"' in frontend.text
     assert 'name="agent_b_base_url"' in frontend.text
+    assert 'name="agent_a_api_key" type="password"' in frontend.text
+    assert 'name="agent_b_api_key" type="password"' in frontend.text
     assert 'name="agent_a_model"' in frontend.text
     assert 'name="agent_b_model"' in frontend.text
     assert 'name="agent_a_system_prompt"' in frontend.text
@@ -57,6 +59,7 @@ def test_frontend_and_empty_history_are_served(tmp_path) -> None:
     assert '"tool_started"' in javascript.text
     assert "function populateScenarioPrompts" in javascript.text
     assert 'system_prompt: values[`${prefix}_system_prompt`].trim()' in javascript.text
+    assert 'api_key: values[`${prefix}_api_key`] || null' in javascript.text
     assert "additional_instructions" not in javascript.text
     assert "followLiveOutput" in javascript.text
     assert "event.deltaY < 0" in javascript.text
@@ -94,6 +97,54 @@ def test_frontend_and_empty_history_are_served(tmp_path) -> None:
     assert health.json() == {"status": "ok", "database": "ok", "langfuse": "disabled"}
     assert history.status_code == 200
     assert history.json() == {"items": [], "total": 0, "limit": 50, "offset": 0}
+
+
+def test_public_conversation_config_redacts_direct_api_keys() -> None:
+    stored = {
+        "agent_a": {"model": "a", "api_key": "secret-a", "api_key_env": None},
+        "agent_b": {"model": "b", "api_key": "secret-b", "api_key_env": "B_KEY"},
+        "summarizer": {"model": "s", "api_key": "secret-s"},
+        "benchmark_scenario_id": "docker-socket",
+    }
+
+    public = _public_config(stored)
+
+    assert all("api_key" not in public[name] for name in ("agent_a", "agent_b", "summarizer"))
+    assert public["agent_b"]["api_key_env"] == "B_KEY"
+    assert stored["agent_a"]["api_key"] == "secret-a"
+
+
+def test_conversation_api_never_returns_direct_api_keys(tmp_path) -> None:
+    app = create_app(
+        Settings(
+            database_url=f"sqlite+aiosqlite:///{tmp_path / 'secrets.sqlite3'}",
+            langfuse_public_key=None,
+            langfuse_secret_key=None,
+            worker_poll_seconds=60,
+        )
+    )
+    agent = {
+        "system_prompt": "Keep this credential private.",
+        "model": "remote-model",
+        "base_url": "https://llm.example/v1",
+        "api_key": "never-return-this",
+        "api_key_env": None,
+    }
+
+    with TestClient(app) as client:
+        app.state.runner.enqueue = lambda _conversation_id: None
+        created = client.post(
+            "/v1/conversations",
+            headers={"Idempotency-Key": "secret-redaction"},
+            json={"agent_a": agent, "agent_b": agent},
+        )
+        viewed = client.get(f"/v1/conversations/{created.json()['conversation_id']}")
+
+    assert created.status_code == 202
+    assert viewed.status_code == 200
+    assert "never-return-this" not in viewed.text
+    assert "api_key" not in viewed.json()["config"]["agent_a"]
+    assert "api_key" not in viewed.json()["config"]["agent_b"]
 
 
 def test_benchmark_catalog_filters_unsupported_memory_poisoning(tmp_path) -> None:

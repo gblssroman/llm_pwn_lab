@@ -66,6 +66,8 @@ class LLMResult:
 
 
 def _api_key(config: AgentConfig) -> str | None:
+    if config.api_key:
+        return config.api_key
     if config.api_key_env:
         return os.getenv(config.api_key_env) or None
     return None

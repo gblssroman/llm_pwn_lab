@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import json
 import time
 import uuid
@@ -55,10 +56,21 @@ from llm_convo.vm_master import (
 STATIC_DIR = Path(__file__).parent / "static"
 
 
+def _public_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Return conversation settings without directly supplied bearer credentials."""
+    public = copy.deepcopy(config)
+    for name in ("agent_a", "agent_b", "summarizer"):
+        agent = public.get(name)
+        if isinstance(agent, dict):
+            agent.pop("api_key", None)
+    return public
+
+
 def _conversation_view(conversation: Conversation, tracing: Tracing) -> ConversationView:
     conversation_id = str(conversation.id)
     return ConversationView.model_validate(conversation).model_copy(
         update={
+            "config": _public_config(conversation.config),
             "langfuse_trace_id": tracing.trace_id(conversation_id),
             "langfuse_url": tracing.trace_url(conversation_id),
         }

@@ -1101,6 +1101,7 @@ async function startConversation(event) {
     system_prompt: values[`${prefix}_system_prompt`].trim(),
     model: values[`${prefix}_model`],
     base_url: values[`${prefix}_base_url`],
+    api_key: values[`${prefix}_api_key`] || null,
     api_key_env: null,
     stream: values[`${prefix}_stream`],
     request_timeout_seconds: Number(values[`${prefix}_request_timeout`]),
@@ -1145,6 +1146,8 @@ async function startConversation(event) {
       headers: { "Idempotency-Key": newIdempotencyKey() },
       body: JSON.stringify(body),
     });
+    form.elements.agent_a_api_key.value = "";
+    form.elements.agent_b_api_key.value = "";
     closeDialog();
     await loadConversations();
     await selectConversation(created.conversation_id);

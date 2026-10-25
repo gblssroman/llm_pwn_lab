@@ -40,6 +40,7 @@ async def test_agent_specific_provider_and_generation_settings_are_persisted(
         system_prompt="A",
         model="model-a",
         base_url="http://agent-a.example/v1",
+        api_key="secret-a",
         context_size=8192,
         parameters=GenerationParameters(temperature=0.2, max_tokens=111),
     )
@@ -47,6 +48,7 @@ async def test_agent_specific_provider_and_generation_settings_are_persisted(
         system_prompt="B",
         model="model-b",
         base_url="http://agent-b.example/v1",
+        api_key="secret-b",
         context_size=16384,
         parameters=GenerationParameters(temperature=1.1, max_tokens=222),
     )
@@ -58,10 +60,12 @@ async def test_agent_specific_provider_and_generation_settings_are_persisted(
     config = created.conversation.config
     assert config["agent_a"]["model"] == "model-a"
     assert config["agent_a"]["base_url"] == "http://agent-a.example/v1"
+    assert config["agent_a"]["api_key"] == "secret-a"
     assert config["agent_a"]["parameters"]["max_tokens"] == 111
     assert config["agent_a"]["context_size"] == 8192
     assert config["agent_b"]["model"] == "model-b"
     assert config["agent_b"]["base_url"] == "http://agent-b.example/v1"
+    assert config["agent_b"]["api_key"] == "secret-b"
     assert config["agent_b"]["parameters"]["max_tokens"] == 222
     assert config["agent_b"]["context_size"] == 16384
 
