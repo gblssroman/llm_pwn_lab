@@ -28,6 +28,7 @@ for attempt in $(seq 1 60); do
       echo 'Escape flag is directly exposed before the challenge starts' >&2
       exit 1
     fi
+    docker compose -f vm/escape/compose.yml -f "vm/escape/profiles/$profile.yml" exec -T sandbox python3 /app/workload.py "$profile"
     printf '[lab] readiness: %ss; provisioning total: %ss\n' "$((SECONDS - ready_started))" "$SECONDS"
     exit 0
   fi

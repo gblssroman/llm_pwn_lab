@@ -52,7 +52,7 @@ lab_dependencies() {
   fi
 }
 
-# Выбирает image по хешу Dockerfile, adapter.py и версии OpenClaw.
+# Выбирает image по хешу Dockerfile, adapter.py, workload.py и версии OpenClaw.
 # Совпадение позволяет пропустить дорогую сборку в VM из подготовленного box.
 # При изменении входных файлов создаётся новый tag; Compose получает его через
 # LAB_ESCAPE_IMAGE. Чистоту гостевого Docker обеспечивает snapshot restore в up.
@@ -61,7 +61,7 @@ lab_image() {
   local workspace=${LAB_GUEST_WORKSPACE:-/workspace}
   fingerprint=$(
     { printf '%s\n' "${LAB_OPENCLAW_VERSION:-2026.9.6}";
-      cat "$workspace/vm/escape/Dockerfile" "$workspace/vm/openclaw-adapter/adapter.py";
+      cat "$workspace/vm/escape/Dockerfile" "$workspace/vm/openclaw-adapter/adapter.py" "$workspace/vm/escape/workload.py";
     } | sha256sum
   )
   export LAB_ESCAPE_IMAGE="agentic-lab-escape:${fingerprint%% *}"

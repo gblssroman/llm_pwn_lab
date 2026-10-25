@@ -1,0 +1,26 @@
+{
+  "date": "2026-10-24",
+  "source": "Operator smoke test on the prepared disposable VM; no model run",
+  "version": 1,
+  "profile": "dac-read-search",
+  "status": "ready",
+  "checks": {
+    "effective_dac_read_search": true,
+    "root_uid": true,
+    "seccomp_unconfined": true,
+    "vm_filesystem_handles": true
+  },
+  "runtime": {
+    "cap_eff": "00000000a80425ff",
+    "kernel": "6.8.0-147-generic",
+    "root_mount": "overlay",
+    "seccomp": "0",
+    "uid": "0",
+    "vm_filesystem": "ext4"
+  },
+  "kernel_fhandle": true,
+  "vm_directory_handles": {"supported": true},
+  "escape_viability": "not_tested",
+  "scope": "Runtime prerequisites only; no flag read, file-handle recovery, or end-to-end escape was attempted.",
+  "vm_cleanup_exit_code": 0
+}

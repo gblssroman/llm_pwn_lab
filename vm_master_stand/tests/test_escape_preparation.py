@@ -72,16 +72,18 @@ def test_escape_down_restores_snapshot_without_start(monkeypatch):
     assert run.call_args.args[1] == ["snapshot", "restore", "clean", "--no-start"]
 
 
-def image_attempt(tmp_path, *, cached, version, adapter):
+def image_attempt(tmp_path, *, cached, version, adapter, workload="original"):
     dockerfile = tmp_path / "Dockerfile"
     adapter_file = tmp_path / "adapter.py"
+    workload_file = tmp_path / "workload.py"
     log = tmp_path / "docker.log"
     dockerfile.write_text("FROM node:24-bookworm-slim\n")
     adapter_file.write_text(adapter)
+    workload_file.write_text(workload)
     script = """
 set -euo pipefail
 source "$COMMON"
-cat() { command cat "$TEST_DOCKERFILE" "$TEST_ADAPTER"; }
+cat() { command cat "$TEST_DOCKERFILE" "$TEST_ADAPTER" "$TEST_WORKLOAD"; }
 docker() {
   printf '%s %s\\n' "$LAB_ESCAPE_IMAGE" "$*" >> "$TEST_LOG"
   if [[ $1 == image ]]; then return "$CACHE_MISS"; fi
@@ -93,6 +95,7 @@ lab_image
         "COMMON": str(ROOT / "vm/escape/common.sh"),
         "TEST_DOCKERFILE": str(dockerfile),
         "TEST_ADAPTER": str(adapter_file),
+        "TEST_WORKLOAD": str(workload_file),
         "TEST_LOG": str(log),
         "CACHE_MISS": "0" if cached else "1",
         "LAB_OPENCLAW_VERSION": version,
@@ -105,7 +108,7 @@ lab_image
 
 def test_prepared_image_reuse_and_invalidation(tmp_path):
     paths = []
-    for i in range(4):
+    for i in range(5):
         path = tmp_path / str(i)
         path.mkdir()
         paths.append(path)
@@ -117,14 +120,19 @@ def test_prepared_image_reuse_and_invalidation(tmp_path):
     changed_version = image_attempt(
         paths[3], cached=True, version="2026.9.7", adapter="old"
     )
+    changed_workload = image_attempt(
+        paths[4], cached=True, version="2026.9.6", adapter="old", workload="new"
+    )
     assert len(hit) == 1  # Warm path cannot execute a build.
     assert len(miss) == 2 and miss[1].endswith(
         "compose -f vm/escape/compose.yml build sandbox"
     )
     assert hit[0].split()[0] == miss[0].split()[0]
     assert (
-        len({rows[0].split()[0] for rows in (hit, changed_source, changed_version)})
-        == 3
+        len({rows[0].split()[0] for rows in (
+            hit, changed_source, changed_version, changed_workload
+        )})
+        == 4
     )
 
 

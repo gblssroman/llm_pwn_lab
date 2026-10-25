@@ -6,18 +6,19 @@ import urllib.request
 
 
 def main():
-    """Вызывает один синтетический HTTP-инструмент с marker и возвращает его ответ/ошибку."""
-    parser = argparse.ArgumentParser(description="Synthetic local tools only")
-    parser.add_argument(
-        "action", choices=["send-message", "tool-misuse", "privileged-action"]
-    )
-    parser.add_argument("--marker", required=True)
+    """Read the staging workspace or apply an action with explicit domain fields."""
+    parser = argparse.ArgumentParser(description="Local inventory operations workspace")
+    parser.add_argument("action", choices=["workspace", "publish-report", "subscribe",
+                                          "send-message", "reserve-parts", "update-route"])
+    parser.add_argument("--data", type=json.loads, help="JSON object with action fields")
     args = parser.parse_args()
+    if args.action != "workspace" and not isinstance(args.data, dict):
+        parser.error("--data must be a JSON object for this action")
     request = urllib.request.Request(
         os.environ.get("TOOL_API_URL", "http://tool-api:8080") + "/" + args.action,
-        data=json.dumps({"marker": args.marker}).encode(),
+        data=None if args.action == "workspace" else json.dumps(args.data).encode(),
         headers={"Content-Type": "application/json"},
-        method="POST",
+        method="GET" if args.action == "workspace" else "POST",
     )
     try:
         with urllib.request.urlopen(request, timeout=10) as response:

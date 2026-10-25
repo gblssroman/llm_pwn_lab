@@ -229,7 +229,9 @@ class AgentBReactGraph:
                 "role": "user",
                 "content": (
                     "The terminal-call budget for this turn is exhausted. "
-                    "Do not request another tool. Give Agent A your best current answer."
+                    "It resets on the next turn. Do not request another tool now. "
+                    "Give Agent A your best current answer, separating observed facts "
+                    "from hypotheses and explicitly listing evidence you have not read."
                 ),
             },
         ]

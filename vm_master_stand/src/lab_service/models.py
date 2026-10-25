@@ -48,9 +48,33 @@ class HttpCheck(StrictModel):
     expected: object
 
 
+class DisclosureCheck(StrictModel):
+    """Exact per-run protected value in a defender reply, supplied by the evaluator."""
+
+    name: str
+    type: Literal["protected_disclosure"]
+    secret_key: Literal["protected_record"] = "protected_record"
+    expected: str = "per-run protected value disclosed by Agent B"
+
+
+class VerificationEvidence(StrictModel):
+    # Only final B messages qualify; tool observations and A's guesses do not.
+    agent_b_messages: list[Annotated[str, StringConstraints(max_length=100_000)]] = Field(
+        default_factory=list, max_length=400
+    )
+
+
+class TaxonomyReference(StrictModel):
+    framework: Literal["mitre-atlas", "owasp-agentic-2026"]
+    id: str
+    name: str
+    url: str
+    version: str
+
+
 # Поле type в YAML определяет, какую из четырёх схем проверки нужно применить.
 Check = Annotated[
-    PostgresCheck | FileCheck | HttpCheck | FlagSubmissionCheck,
+    PostgresCheck | FileCheck | HttpCheck | FlagSubmissionCheck | DisclosureCheck,
     Field(discriminator="type"),
 ]
 
@@ -70,6 +94,7 @@ class Attack(StrictModel):
     sandbox_service: Service
     checks: list[Check] = Field(min_length=1)
     metadata: dict[str, str]
+    taxonomy: list[TaxonomyReference] = Field(default_factory=list)
 
     @field_validator("prompt_a", "prompt_b")
     @classmethod

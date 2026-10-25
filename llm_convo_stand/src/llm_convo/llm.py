@@ -31,6 +31,18 @@ class StreamUnsupportedError(LLMError):
     pass
 
 
+def _describe_error(error: Exception) -> str:
+    detail = str(error).strip()
+    if not detail:
+        if isinstance(error, httpx.TimeoutException):
+            detail = "Timed out while communicating with the LLM endpoint."
+        elif isinstance(error, httpx.NetworkError):
+            detail = "Network connection to the LLM endpoint failed or was closed."
+        else:
+            detail = "HTTP client operation failed."
+    return f"{type(error).__name__}: {detail}"
+
+
 @dataclass(slots=True)
 class ToolCall:
     id: str
@@ -230,13 +242,15 @@ class OpenAICompatibleClient:
                     base_url=str(config.base_url),
                     request_attempts=attempts,
                     retry_in_seconds=round(delay, 3),
-                    error=str(exc),
+                    error=_describe_error(exc),
                 )
                 await asyncio.sleep(delay)
             except httpx.HTTPError as exc:
-                raise LLMError(f"LLM HTTP client error: {exc}") from exc
+                raise LLMError(f"LLM HTTP client error: {_describe_error(exc)}") from exc
+        assert last_error is not None
         raise LLMError(
-            f"LLM request failed after {attempts} attempt(s): {last_error}"
+            f"LLM request failed after {attempts} attempt(s) "
+            f"(endpoint={config.base_url}): {_describe_error(last_error)}"
         ) from last_error
 
     async def _fallback_to_non_stream(

@@ -306,6 +306,22 @@ class Runner:
             else:
                 command = "sudo bash /workspace/vm/activate.sh"
             result = self.remote(attack, command, self.settings.lifecycle_timeout)
+            if attack.mode == "escape" and attack.profile == "dac-read-search" and not (
+                result.exit_code or result.timed_out
+            ):
+                # Evaluator-only: sent from the current runner rather than the
+                # prepared snapshot. Never included in agent terminal observations.
+                source = Path(__file__).with_name("escape_diagnostics.py").read_bytes()
+                payload = base64.b64encode(source).decode("ascii")
+                probe = (
+                    "import base64; exec(compile(base64.b64decode("
+                    + repr(payload) + "), '<preflight>', 'exec'))"
+                )
+                diagnostic = self.remote(attack, "sudo python3 -c " + shlex.quote(probe), 60)
+                result.stdout += "\n" + diagnostic.stdout
+                result.stderr += diagnostic.stderr
+                result.exit_code = diagnostic.exit_code
+                result.timed_out = diagnostic.timed_out
             timing = (
                 "[lab] prepared VM restore + activation: "
                 f"{time.monotonic() - started:.1f}s\n"

@@ -18,6 +18,7 @@ from llm_convo.context import (
 )
 from llm_convo.llm import LLMResult, OpenAICompatibleClient, ToolCall
 from llm_convo.logging import log_event
+from llm_convo.loop_detection import loop_reason
 from llm_convo.models import (
     ContextSnapshot,
     Conversation,
@@ -311,6 +312,24 @@ class ConversationRunner:
                 )
                 if should_stop:
                     return
+            reason = await self._loop_reason(conversation_id)
+            if reason:
+                if is_benchmark and self._benchmark:
+                    await self._benchmark.begin_evaluation(conversation_id, reason=reason)
+                else:
+                    await self._finish(conversation_id, ConversationStatus.completed, reason=reason)
+                return
+
+    async def _loop_reason(self, conversation_id: uuid.UUID) -> str | None:
+        # Read durable recent turns independently of context compression and restarts.
+        async with self._sessions() as session:
+            result = await session.scalars(
+                select(Message)
+                .where(Message.conversation_id == conversation_id)
+                .order_by(Message.sequence.desc())
+                .limit(6)
+            )
+            return loop_reason(list(reversed(list(result))))
 
     async def _load(self, conversation_id: uuid.UUID) -> tuple[Conversation, list[Message]]:
         async with self._sessions() as session:
@@ -332,12 +351,16 @@ class ConversationRunner:
     ) -> tuple[Conversation, list[Message], WorkingContext]:
         context_size = agent.context_size or state.context_size
         compression_threshold = agent.compression_threshold or state.compression_threshold
+        observations = (
+            await self._benchmark.terminal_observations(state.id) if self._benchmark else {}
+        )
         for _ in range(3):
             prompt = build_working_context(
                 system_prompt=agent.system_prompt,
                 speaker=state.next_speaker,
                 summary=state.working_summary,
                 messages=messages,
+                tool_observations=observations,
             )
             if not needs_compression(
                 estimated_prompt_tokens=prompt.estimated_tokens,
@@ -747,7 +770,9 @@ class ConversationRunner:
                     owner_task.cancel()
                 return
 
-    async def _finish(self, conversation_id: uuid.UUID, status: ConversationStatus) -> None:
+    async def _finish(
+        self, conversation_id: uuid.UUID, status: ConversationStatus, *, reason: str | None = None
+    ) -> None:
         now = utc_now()
         async with self._sessions() as session, session.begin():
             conversation = await session.scalar(
@@ -774,13 +799,13 @@ class ConversationRunner:
                 ConversationEvent(
                     conversation_id=conversation_id,
                     event_type=f"conversation_{status.value}",
-                    payload={"turn_count": conversation.turn_count},
+                    payload={"turn_count": conversation.turn_count, "reason": reason},
                 )
             )
         await self._realtime.publish(
             conversation_id,
             f"conversation_{status.value}",
-            {"status": status.value, "turn_count": conversation.turn_count},
+            {"status": status.value, "turn_count": conversation.turn_count, "reason": reason},
         )
         log_event(
             logger,

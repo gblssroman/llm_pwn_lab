@@ -142,6 +142,7 @@ class VmMasterClient:
         *,
         command: str | None = None,
         timeout_seconds: int = 30,
+        verification_evidence: dict[str, Any] | None = None,
     ) -> tuple[str, Role]:
         role: Role = "sandbox" if action == "sandbox" else "evaluator"
         body = None
@@ -149,6 +150,8 @@ class VmMasterClient:
             if not command:
                 raise ValueError("sandbox job requires a command")
             body = {"command": command, "timeout_seconds": timeout_seconds}
+        elif action == "verify":
+            body = verification_evidence
         payload = await self._request(
             "POST",
             f"/v1/attacks/{scenario_id}/jobs/{action}",
@@ -166,6 +169,7 @@ class VmMasterClient:
         *,
         on_log: LogCallback | None = None,
         timeout_seconds: float | None = None,
+        allow_command_failure: bool = False,
     ) -> dict[str, Any]:
         deadline = time.monotonic() + (timeout_seconds or self._job_timeout_seconds)
         cursor = 0
@@ -186,6 +190,16 @@ class VmMasterClient:
                         await pending
             status = payload.get("status")
             if status == "failed":
+                result = payload.get("result")
+                # A shell exit status is an observation, not a transport failure.
+                if (
+                    allow_command_failure
+                    and not payload.get("error")
+                    and isinstance(result, dict)
+                    and isinstance(result.get("exit_code"), int)
+                    and all(key in result for key in ("stdout", "stderr", "timed_out"))
+                ):
+                    return result
                 message = payload.get("error") or "vm_master job failed"
                 result = payload.get("result")
                 if isinstance(result, dict):
@@ -215,6 +229,7 @@ class VmMasterClient:
         on_log: LogCallback | None = None,
         job_timeout_seconds: float | None = None,
         wait_if_busy: bool = False,
+        verification_evidence: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         job_timeout = job_timeout_seconds or self._job_timeout_seconds
         deadline = time.monotonic() + job_timeout
@@ -225,6 +240,7 @@ class VmMasterClient:
                     action,
                     command=command,
                     timeout_seconds=timeout_seconds,
+                    verification_evidence=verification_evidence,
                 )
             except VmMasterBusyError:
                 if not wait_if_busy or time.monotonic() >= deadline:
@@ -240,6 +256,7 @@ class VmMasterClient:
             role,
             on_log=on_log,
             timeout_seconds=remaining,
+            allow_command_failure=action == "sandbox",
         )
 
     async def submit_flag(self, scenario_id: str, flag: str) -> dict[str, Any]:

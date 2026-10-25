@@ -99,6 +99,12 @@ function selectedScenario() {
   return state.scenarios.find((item) => item.id === $("#scenario-id").value) || null;
 }
 
+function scenarioModeLabel(scenario) {
+  if (scenario.mode !== "agent") return scenario.mode;
+  const owasp = (scenario.category || "").match(/(?:^|;)\s*OWASP(?:\s+laboratory)?\s*:\s*([^;]+)/i);
+  return owasp ? "agent · OWASP: " + owasp[1].trim() : scenario.mode;
+}
+
 function populateScenarioPrompts() {
   const scenario = selectedScenario();
   if (!scenario || $("#run-type").value !== "benchmark") return;
@@ -116,7 +122,7 @@ function renderScenarioPreview() {
     return;
   }
   preview.replaceChildren(
-    node("strong", "", scenario.title + " · " + scenario.mode),
+    node("strong", "", scenario.title + " · " + scenarioModeLabel(scenario)),
     node("div", "message-meta", scenario.category),
     node("p", "", "The scenario prompts are loaded below and can be edited before the run."),
   );
@@ -127,7 +133,7 @@ async function loadScenarios() {
   try {
     state.scenarios = await api("/v1/benchmark-scenarios");
     select.replaceChildren(...state.scenarios.map((scenario) => {
-      const option = node("option", "", "[" + scenario.mode + "] " + scenario.title);
+      const option = node("option", "", "[" + scenarioModeLabel(scenario) + "] " + scenario.title);
       option.value = scenario.id;
       return option;
     }));
@@ -461,7 +467,7 @@ function messageElement(message, live = false) {
       node("span", "", `${fmtNumber(message.prompt_tokens)} in`),
       node("span", "", `${fmtNumber(message.completion_tokens)} out`),
       node("span", "", message.streamed ? "stream" : "response"),
-      node("span", "", `${message.attempts} attempt${message.attempts === 1 ? "" : "s"}`),
+      node("span", "", `${message.attempts} API request${message.attempts === 1 ? "" : "s"} incl. tool steps/retries`),
     );
     body.append(metrics);
   }
@@ -694,6 +700,28 @@ function renderBenchmark() {
   addKv(summary, "B tools", run.max_tool_calls_per_b_turn + " per turn");
   addKv(summary, "Reason", run.completion_reason);
   panel.append(summary);
+
+  if (run.assessment) {
+    const assessment = node("div", "inspect-section");
+    const value = run.assessment;
+    const yesNo = (item) => item === true ? "Yes" : item === false ? "No" : "Unknown";
+    assessment.append(node("h3", "", "Escape observations"));
+    addKv(assessment, "Run ID", value.run_id);
+    addKv(assessment, "Environment started", yesNo(value.environment_started));
+    addKv(assessment, "Runtime prerequisites", value.preflight?.status || "Not checked");
+    addKv(assessment, "Direct target read attempt", value.direct_target_read_attempt.status);
+    addKv(assessment, "Escape", value.escape);
+    addKv(assessment, "Exact flag disclosed", yesNo(value.exact_flag_disclosed));
+    addKv(assessment, "Role adherence", value.role_adherence || "Not evaluated");
+    addKv(assessment, "Authorization", value.authorization?.status || "Not evaluated");
+    addKv(assessment, "Report artifact", value.report_artifact?.status || "Not checked");
+    addKv(assessment, "Diagnosis quality", value.diagnosis_quality || "Not evaluated");
+    assessment.append(node("p", "", value.direct_target_read_attempt.scope));
+    if (value.preflight) {
+      assessment.append(node("pre", "", JSON.stringify(value.preflight, null, 2)));
+    }
+    panel.append(assessment);
+  }
 
   if (run.scenario?.metadata?.attack_success) {
     const meaning = node("div", "prompt-block");

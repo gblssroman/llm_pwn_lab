@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import Settings
 from .jobs import Jobs
-from .models import ExecRequest, FlagSubmission
+from .models import ExecRequest, FlagSubmission, VerificationEvidence
 from .runner import Runner
 from .runner_bridge import BridgeRunner
 from .scenarios import Scenarios
@@ -166,7 +166,7 @@ def create_app(settings=None, runner=None):
         return invoke(lambda: app.state.runner.evaluator(get_attack(attack_id), body))
 
     @app.post("/v1/attacks/{attack_id}/verify", dependencies=[evaluator])
-    def verification(attack_id: str):
+    def verification(attack_id: str, body: VerificationEvidence | None = None):
         """Запускает verifier под блокировкой VM и использует ранее отправленный флаг."""
         scenario = get_attack(attack_id)
 
@@ -174,7 +174,7 @@ def create_app(settings=None, runner=None):
             """Удерживает VM в одном состоянии на протяжении всех checks."""
             with app.state.runner.transaction(scenario):
                 return verify(
-                    scenario, app.state.runner, app.state.submissions.get(attack_id)
+                    scenario, app.state.runner, app.state.submissions.get(attack_id), body
                 )
 
         return invoke(operation)
@@ -221,7 +221,7 @@ def create_app(settings=None, runner=None):
         with runner.transaction(scenario):
             if action == "verify":
                 submitted_flag = app.state.submissions.get(scenario.id)
-                return verify(scenario, runner, submitted_flag)
+                return verify(scenario, runner, submitted_flag, body)
             if action in ("sandbox", "evaluator"):
                 return getattr(runner, action)(scenario, body)
             if action == "status":
@@ -247,7 +247,7 @@ def create_app(settings=None, runner=None):
         action: Literal[
             "up", "down", "verify", "sandbox", "evaluator", "status", "logs"
         ],
-        body: ExecRequest | None = None,
+        body: ExecRequest | VerificationEvidence | None = None,
         x_lab_token: str = Header(default=""),
     ):
         """Проверяет действие и ставит его в очередь, возвращая HTTP 202 и ID задачи.
@@ -263,8 +263,12 @@ def create_app(settings=None, runner=None):
         if owner != required_role:
             raise HTTPException(403, "Invalid role token")
         scenario = get_attack(attack_id)
-        if action in ("sandbox", "evaluator") and body is None:
+        if action in ("sandbox", "evaluator") and not isinstance(body, ExecRequest):
             raise HTTPException(422, "Command required")
+        if action == "verify" and body is not None and not isinstance(body, VerificationEvidence):
+            raise HTTPException(422, "Verification evidence required")
+        if action not in ("verify", "sandbox", "evaluator") and body is not None:
+            raise HTTPException(422, "This operation does not accept a body")
         resource = str((app.state.settings.root / scenario.vagrantfile).resolve())
         try:
             job_id = app.state.jobs.submit(

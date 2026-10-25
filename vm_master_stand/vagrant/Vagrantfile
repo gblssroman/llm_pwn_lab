@@ -16,7 +16,8 @@ Vagrant.configure("2") do |config|
     config.vm.synced_folder repo, "/workspace", mount_options: ["ro"]
   end
   config.vm.provider "virtualbox" do |vb|
-    vb.cpus = 2
+    # A single vCPU avoids guest RCU stalls observed during runtime-box boot.
+    vb.cpus = 1
     vb.memory = 4096
     vb.linked_clone = ENV["LAB_LINKED_CLONE"] == "1"
   end

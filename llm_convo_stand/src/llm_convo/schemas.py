@@ -330,6 +330,7 @@ class BenchmarkRunView(BaseModel):
     updated_at: datetime
     ended_at: datetime | None
     tool_executions: list[ToolExecutionView] = Field(default_factory=list)
+    assessment: dict[str, Any] | None = None
 
 
 class VmMasterHealthResponse(BaseModel):

@@ -34,6 +34,7 @@ BOX_INPUTS = (
     "vm/escape/prepare-box.sh",
     "vm/escape/setup.sh",
     "vm/escape/Dockerfile",
+    "vm/escape/workload.py",
     "vm/escape/compose.yml",
     "vm/escape/profiles/dac-read-search.yml",
     "vm/escape/profiles/docker-socket.yml",

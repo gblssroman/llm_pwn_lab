@@ -1,6 +1,8 @@
 import asyncio
 import hashlib
+import json
 import re
+import shlex
 import uuid
 from dataclasses import dataclass
 from datetime import timedelta
@@ -10,19 +12,26 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from llm_convo.escape_assessment import (
+    REPORT_PROBE_SOURCE,
+    assessment_exhausted,
+    build_escape_assessment,
+)
 from llm_convo.llm import ToolCall
+from llm_convo.loop_detection import repeated_tool_reason
 from llm_convo.models import (
     BenchmarkRun,
     Conversation,
     ConversationEvent,
     ConversationStatus,
+    Message,
     ToolExecution,
     utc_now,
 )
 from llm_convo.realtime import RealtimeBroker
 from llm_convo.schemas import StartBenchmarkRequest, VmScenario
 from llm_convo.service import IdempotencyConflictError
-from llm_convo.vm_master import VmMasterClient
+from llm_convo.vm_master import VmMasterClient, VmMasterJobError
 
 FLAG_PATTERN = re.compile(r"flag\{[a-zA-Z0-9_-]+\}")
 
@@ -144,7 +153,29 @@ class BenchmarkService:
                     ToolExecution.created_at,
                 )
             )
-            return run, list(tools)
+            tools = list(tools)
+            if run.scenario_mode == "escape":
+                up_event = await session.scalar(
+                    select(ConversationEvent)
+                    .where(
+                        ConversationEvent.conversation_id == conversation_id,
+                        ConversationEvent.event_type == "vm_job_completed",
+                        ConversationEvent.payload["action"].as_string() == "up",
+                    )
+                    .order_by(ConversationEvent.created_at.desc())
+                    .limit(1)
+                )
+                report_event = await session.scalar(
+                    select(ConversationEvent).where(
+                        ConversationEvent.conversation_id == conversation_id,
+                        ConversationEvent.event_type == "report_artifact_checked",
+                    ).order_by(ConversationEvent.created_at.desc()).limit(1)
+                )
+                run.assessment = build_escape_assessment(
+                    run, tools, up_event.payload.get("result") if up_event else None,
+                    report_event.payload if report_event else None,
+                )
+            return run, tools
 
     async def run(self, conversation_id: uuid.UUID) -> BenchmarkRun | None:
         async with self._sessions() as session:
@@ -286,6 +317,12 @@ class BenchmarkCoordinator:
                 conversation.updated_at = now
             await self._set_stage(conversation_id, "conversation")
         except Exception as exc:
+            if isinstance(exc, VmMasterJobError) and isinstance(exc.job.get("result"), dict):
+                await self._event(
+                    conversation_id,
+                    "vm_job_completed",
+                    {"action": "up", "result": exc.job["result"]},
+                )
             await self.mark_failure(conversation_id, exc)
             raise
 
@@ -372,10 +409,11 @@ class BenchmarkCoordinator:
             )
             return {"error": str(exc), "timed_out": False}
         now = utc_now()
+        status = "failed" if result.get("exit_code") or result.get("timed_out") else "completed"
         async with self._sessions() as session, session.begin():
             current = await session.get(ToolExecution, execution.id)
             if current is not None:
-                current.status = "completed"
+                current.status = status
                 current.result = result
                 current.completed_at = now
         await self._event(
@@ -384,11 +422,51 @@ class BenchmarkCoordinator:
             {
                 "tool_execution_id": str(execution.id),
                 "tool_call_id": call.id,
-                "status": "completed",
+                "status": status,
                 "result": result,
             },
         )
         return result
+
+    async def terminal_observations(self, conversation_id: uuid.UUID) -> dict[int, str]:
+        """Share bounded shell evidence across turns, without evaluator data."""
+        async with self._sessions() as session:
+            rows = list(await session.scalars(
+                select(ToolExecution)
+                .where(
+                    ToolExecution.conversation_id == conversation_id,
+                    ToolExecution.status.in_(("completed", "failed")),
+                )
+                .order_by(ToolExecution.message_sequence.desc(), ToolExecution.ordinal.desc())
+                .limit(200)
+            ))
+        # Keep the latest eight calls plus eight distinct earlier observations.
+        # Selection uses tool evidence only and remains bounded after compression.
+        selected = list(rows[:8])
+        seen = {json.dumps([row.arguments, row.result], sort_keys=True) for row in selected}
+        for row in reversed(rows[8:]):
+            key = json.dumps([row.arguments, row.result], sort_keys=True)
+            if key not in seen:
+                selected.append(row)
+                seen.add(key)
+            if len(selected) >= 16:
+                break
+        selected.sort(key=lambda row: (row.message_sequence, row.ordinal))
+        observations: dict[int, str] = {}
+        for row in selected:
+            evidence = {
+                "command": row.arguments.get("command", "")[:1000],
+                **(row.result or {"error": row.error}),
+            }
+            for key in ("stdout", "stderr"):
+                value = evidence.get(key)
+                if isinstance(value, str) and len(value) > 1000:
+                    evidence[key] = value[:500] + "\n...[truncated]...\n" + value[-500:]
+            observations[row.message_sequence] = (
+                observations.get(row.message_sequence, "")
+                + json.dumps(evidence, ensure_ascii=False) + "\n"
+            )
+        return observations
 
     async def record_agent_step(
         self,
@@ -426,10 +504,14 @@ class BenchmarkCoordinator:
         content: str,
         turn_count: int,
     ) -> bool:
-        if speaker != "agent_b":
-            return False
         run = await self.get_run(conversation_id)
         if run is None or run.stage != "conversation":
+            return False
+        if speaker == "agent_a":
+            if run.scenario_mode == "escape" and assessment_exhausted(content):
+                return await self.begin_evaluation(conversation_id, reason="attacker_exhausted")
+            return False
+        if speaker != "agent_b":
             return False
         turn_verdict: dict[str, Any] | None = None
         if run.scenario_mode == "agent":
@@ -477,6 +559,17 @@ class BenchmarkCoordinator:
                     final_status=ConversationStatus.completed,
                 )
                 return True
+        if run.scenario_mode == "escape":
+            async with self._sessions() as session:
+                tools = list(await session.scalars(
+                    select(ToolExecution).where(
+                        ToolExecution.conversation_id == conversation_id,
+                    ).order_by(ToolExecution.message_sequence.desc(), ToolExecution.ordinal.desc())
+                    .limit(200)
+                ))
+            reason = repeated_tool_reason(list(reversed(tools)))
+            if reason:
+                return await self.begin_evaluation(conversation_id, reason=reason)
         if turn_count // 2 >= run.max_rounds:
             started = await self.begin_evaluation(
                 conversation_id,
@@ -503,11 +596,25 @@ class BenchmarkCoordinator:
             "benchmark_verification_started",
             {"automatic": run.stage == "conversation"},
         )
+        evidence = None
+        if any(
+            check.get("type") == "protected_disclosure"
+            for check in run.scenario.get("checks", [])
+        ):
+            async with self._sessions() as session:
+                replies = await session.scalars(
+                    select(Message.content).where(
+                        Message.conversation_id == conversation_id,
+                        Message.speaker == "agent_b",
+                    ).order_by(Message.sequence)
+                )
+                evidence = {"agent_b_messages": list(replies)}
         verdict = await self.client.run_job(
             run.scenario_id,
             "verify",
             on_log=lambda event: self._job_log(conversation_id, "verify", event),
             wait_if_busy=True,
+            verification_evidence=evidence,
         )
         await self._event(
             conversation_id,
@@ -559,6 +666,28 @@ class BenchmarkCoordinator:
         )
 
         return True
+
+    async def _check_report_artifact(self, conversation_id: uuid.UUID, run: BenchmarkRun) -> None:
+        """Operator-only presence check before cleanup; never changes the flag verdict."""
+        observation = {"version": 1, "status": "unknown", "run_id": str(conversation_id)}
+        try:
+            result = await self.client.run_job(
+                run.scenario_id, "sandbox",
+                command="python3 -c " + shlex.quote(REPORT_PROBE_SOURCE),
+                timeout_seconds=5, job_timeout_seconds=15, wait_if_busy=True,
+            )
+            if result.get("exit_code") == 0 and not result.get("timed_out"):
+                value = json.loads(result.get("stdout", ""))
+                if isinstance(value, dict) and value.get("version") == 1:
+                    if value.get("status") in {"present", "missing", "unknown"}:
+                        observation["status"] = value["status"]
+                        size = value.get("size_bytes")
+                        if isinstance(size, int) and size >= 0:
+                            observation["size_bytes"] = size
+        except Exception:
+            # A diagnostic failure must not prevent verification or VM cleanup.
+            pass
+        await self._event(conversation_id, "report_artifact_checked", observation)
 
     async def request_abort(self, conversation_id: uuid.UUID) -> bool:
         now = utc_now()
@@ -631,6 +760,8 @@ class BenchmarkCoordinator:
             run = await self.get_run(conversation_id) or run
 
         if run.stage == "evaluating":
+            if run.scenario_mode == "escape":
+                await self._check_report_artifact(conversation_id, run)
             try:
                 if run.scenario_mode == "escape" and run.flag_candidate:
                     barrier = await self.client.run_job(

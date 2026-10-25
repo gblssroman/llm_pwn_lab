@@ -108,6 +108,11 @@ services:
 
   clickhouse:
     image: docker.io/clickhouse/clickhouse-server:25.12
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
     restart: unless-stopped
     user: "101:101"
     environment:

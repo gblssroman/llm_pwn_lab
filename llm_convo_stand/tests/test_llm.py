@@ -186,3 +186,39 @@ async def test_non_streaming_response() -> None:
     assert result.total_tokens == 12
     assert result.finish_reason == "length"
     await http.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error_type, detail",
+    [
+        (httpx.ReadError, "Network connection"),
+        (httpx.ConnectError, "Network connection"),
+        (httpx.ReadTimeout, "Timed out"),
+    ],
+)
+async def test_empty_transport_error_keeps_type_endpoint_and_retry_log(
+    error_type, detail, monkeypatch, caplog
+) -> None:
+    async def handler(request):
+        raise error_type("", request=request)
+
+    async def no_delay(_):
+        pass
+
+    monkeypatch.setattr("llm_convo.llm.asyncio.sleep", no_delay)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = OpenAICompatibleClient(http)
+        with caplog.at_level("WARNING"), pytest.raises(LLMError) as caught:
+            await client.complete(
+                config=config(StreamMode.never, max_retries=1),
+                messages=[{"role": "user", "content": "hi"}],
+            )
+    message = str(caught.value)
+    assert "2 attempt(s)" in message
+    assert "http://llm.test/v1" in message
+    assert error_type.__name__ in message
+    assert detail in message
+    assert isinstance(caught.value.__cause__, error_type)
+    assert error_type.__name__ in caplog.text
+    assert detail in caplog.text

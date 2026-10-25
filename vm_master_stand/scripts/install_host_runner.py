@@ -34,7 +34,12 @@ WantedBy=default.target
 """)
     subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
     subprocess.run(
-        ["systemctl", "--user", "enable", "--now", "agentic-lab-host-runner.service"],
+        ["systemctl", "--user", "enable", "agentic-lab-host-runner.service"],
+        check=True,
+    )
+    # enable --now does not restart an active process after the unit's paths change.
+    subprocess.run(
+        ["systemctl", "--user", "restart", "agentic-lab-host-runner.service"],
         check=True,
     )
     subprocess.run(

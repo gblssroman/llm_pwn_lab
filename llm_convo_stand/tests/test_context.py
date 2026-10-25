@@ -156,3 +156,16 @@ def test_start_request_uses_each_agents_context_limit() -> None:
 def test_extra_body_cannot_override_core_generation_fields() -> None:
     with pytest.raises(ValidationError, match="cannot override"):
         AgentConfig(system_prompt="system", extra_body={"max_tokens": 1})
+
+
+def test_compressed_history_retains_actual_tool_evidence_separately_from_summary():
+    result = build_working_context(
+        system_prompt="Support", speaker="agent_b", summary="An unverified conclusion",
+        messages=[Item(10, "agent_a", "Continue")],
+        tool_observations={2: "actual historical result", 10: "current result"},
+    )
+    content = str(result.messages)
+    assert "actual historical result" in content
+    assert "historical snapshots" in content
+    assert content.count("current result") == 1
+    assert result.messages[0] == {"role": "system", "content": "Support"}

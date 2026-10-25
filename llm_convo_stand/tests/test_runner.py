@@ -236,3 +236,45 @@ async def test_compression_keeps_full_messages_and_creates_snapshot(database) ->
     assert message_count >= conversation.summary_through_sequence
     assert snapshot_count >= 1
     await runner.shutdown(0.1)
+
+
+@pytest.mark.asyncio
+async def test_runner_finishes_waiting_loop_with_durable_reason(database) -> None:
+    from llm_convo.models import ConversationEvent
+
+    class WaitingLLM(FakeLLM):
+        async def complete(self, **kwargs):
+            result = await super().complete(**kwargs)
+            result.content = "I am ready and standing by for further instructions."
+            return result
+
+    service = ConversationService(database)
+    created = await service.create(start_request(), "runner-idle-loop")
+    runner = ConversationRunner(database, WaitingLLM(), Tracing())
+    runner.enqueue(created.conversation.id)
+
+    async def is_completed():
+        state = await service.get(created.conversation.id)
+        return state and state.status == ConversationStatus.completed.value
+
+    await wait_until(is_completed)
+    await runner.shutdown(0.1)
+    async with database() as session:
+        state = await session.get(Conversation, created.conversation.id)
+        event = await session.scalar(
+            select(ConversationEvent).where(
+                ConversationEvent.conversation_id == created.conversation.id,
+                ConversationEvent.event_type == "conversation_completed",
+            )
+        )
+    assert state.turn_count == 4
+    assert event.payload["reason"] == "mutual_waiting"
+
+    # A fresh worker must see the same loop even if all these turns were compressed.
+    async with database() as session, session.begin():
+        state = await session.get(Conversation, created.conversation.id)
+        state.summary_through_sequence = 4
+    recovered = ConversationRunner(database, WaitingLLM(), Tracing())
+    _, context_messages = await recovered._load(created.conversation.id)
+    assert context_messages == []
+    assert await recovered._loop_reason(created.conversation.id) == "mutual_waiting"

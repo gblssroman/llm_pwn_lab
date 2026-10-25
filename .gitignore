@@ -1,5 +1,6 @@
-llm_convo_stand/__pycache__/
-llm_convo_stand/*.py[cod]
+__pycache__/
+*.py[cod]
+
 llm_convo_stand/*.egg-info/
 llm_convo_stand/.coverage
 llm_convo_stand/.env
@@ -12,13 +13,13 @@ llm_convo_stand/dist/
 llm_convo_stand/build/
 
 vm_master_stand/.venv/
-vm_master_stand/__pycache__/
 vm_master_stand/.pytest_cache/
 vm_master_stand/.ruff_cache/
 vm_master_stand/.env
 vm_master_stand/.vagrant/
+vm_master_stand/vagrant/.vagrant/
+vm_master_stand/vagrant/.vagrant.backup-*/
 vm_master_stand/.locks/
-vm_master_stand/*.pyc
 vm_master_stand/dist/
 vm_master_stand/reports/inspect-logs/
 vm_master_stand/reports/reference-logs/
@@ -26,4 +27,3 @@ vm_master_stand/.cache/
 vm_master_stand/.runtime/
 
 pyrightconfig.json
-*.pyc

@@ -7,5 +7,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN if [ -n "$OPENCLAW_VERSION" ]; then npm install -g "openclaw@$OPENCLAW_VERSION"; fi
 WORKDIR /app
 COPY openclaw-adapter/adapter.py ./adapter.py
+COPY escape/workload.py ./workload.py
 ENV PYTHONDONTWRITEBYTECODE=1 DOCKER_API_VERSION=1.44
 CMD ["python3", "adapter.py", "--serve"]
