@@ -4,15 +4,20 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="dark" />
-    <title>Agent Relay</title>
-    <link rel="stylesheet" href="/assets/app.css?v=vm-benchmark-4" />
+    <title>Agent PWN Lab</title>
+    <link rel="stylesheet" href="/assets/app.css?v=branding-1" />
   </head>
   <body>
-    <div class="app-shell">
+    <nav class="product-switch" aria-label="Workspace section">
+      <button type="button" class="active" id="agent-relay-tab" aria-selected="true">Agent PWN Lab</button>
+      <button type="button" id="vm-manager-tab" aria-selected="false">VM Manager</button>
+    </nav>
+
+    <div class="app-shell" id="agent-relay-view">
       <aside class="sidebar">
         <div class="brand">
           <div>
-            <strong>Agent Relay</strong>
+            <strong>Agent PWN Lab</strong>
             <small>LLM conversation lab</small>
           </div>
         </div>
@@ -42,6 +47,10 @@
               <span class="service-state"><i class="status-square unknown" id="database-status"></i>DB</span>
               <span class="service-state"><i class="status-square unknown" id="langfuse-status"></i>Langfuse</span>
               <span class="service-state"><i class="status-square unknown" id="vm-master-status"></i>VM</span>
+            </div>
+            <div class="made-by">
+              Made by <a href="https://github.com/gblssroman" target="_blank" rel="noreferrer">Roman Prasad</a>
+              and <a href="https://github.com/redrumerr" target="_blank" rel="noreferrer">Alexander Makeykin</a>
             </div>
           </div>
         </div>
@@ -102,6 +111,26 @@
         </div>
       </aside>
     </div>
+
+    <main class="vm-manager-view hidden" id="vm-manager-view">
+      <header class="vm-manager-header">
+        <div>
+          <div class="eyebrow">VM pool</div>
+          <h1>Scenario virtual machines</h1>
+          <p>Warm VMs start benchmarks immediately. Every completed run is reset to its clean snapshot before reuse.</p>
+        </div>
+        <div class="vm-manager-actions">
+          <button type="button" class="primary-button" id="warm-all-vms">Turn on all</button>
+          <button type="button" class="danger-button" id="shutdown-all-vms">Shutdown all</button>
+          <button type="button" class="ghost-button" id="refresh-vm-pool">Refresh</button>
+        </div>
+      </header>
+      <section class="vm-pool-summary" id="vm-pool-summary"></section>
+      <div class="inline-error hidden" id="vm-pool-error"></div>
+      <section class="vm-pool-grid" id="vm-pool-grid">
+        <div class="vm-pool-empty">Open VM Manager to load the pool.</div>
+      </section>
+    </main>
 
     <dialog id="start-dialog">
       <form id="start-form">
@@ -219,6 +248,6 @@
 
     <div class="toast" id="toast"></div>
     <script src="/assets/markdown.js?v=vm-benchmark-1" defer></script>
-    <script src="/assets/app.js?v=vm-benchmark-8" defer></script>
+    <script src="/assets/app.js?v=vm-manager-2" defer></script>
   </body>
 </html>

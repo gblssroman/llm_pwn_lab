@@ -12,6 +12,9 @@ const state = {
   benchmark: null,
   scenarios: [],
   vmMaster: null,
+  vmPool: [],
+  vmPoolSubmitting: false,
+  activeView: "relay",
   eventSource: null,
   liveDraft: null,
   followLiveOutput: true,
@@ -58,6 +61,9 @@ function fmtDuration(ms) {
 }
 function fmtNumber(value) { return value == null ? "—" : new Intl.NumberFormat("ru-RU").format(value); }
 function statusLabel(status) { return String(status || "unknown").replaceAll("_", " "); }
+function fmtMemory(memoryMb) {
+  return `${new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 }).format(memoryMb / 1024)} GB`;
+}
 
 function node(tag, className, text) {
   const element = document.createElement(tag);
@@ -93,6 +99,127 @@ async function checkHealth() {
     state.vmMaster = null;
     $("#vm-master-status").className = "status-square unknown";
   }
+}
+
+function setVmPoolControls() {
+  const disabled = state.vmPoolSubmitting;
+  $("#warm-all-vms").disabled = disabled;
+  $("#shutdown-all-vms").disabled = disabled;
+  $("#refresh-vm-pool").disabled = disabled;
+  $$("[data-vm-pool-action]").forEach((button) => { button.disabled = disabled; });
+}
+
+function renderVmPool() {
+  const activeStates = new Set(["warming", "ready", "in_use", "resetting"]);
+  const ready = state.vmPool.filter((item) => item.state === "ready").length;
+  const activeMemory = state.vmPool
+    .filter((item) => activeStates.has(item.state))
+    .reduce((total, item) => total + item.memory_mb, 0);
+  const desiredWarm = state.vmPool.filter((item) => item.desired === "warm").length;
+  const summary = $("#vm-pool-summary");
+  summary.replaceChildren();
+  for (const [label, value] of [
+    ["Ready", `${ready}/${state.vmPool.length}`],
+    ["Active guest RAM", fmtMemory(activeMemory)],
+    ["Keep warm", String(desiredWarm)],
+  ]) {
+    const card = node("div", "stat");
+    card.append(node("span", "", label), node("strong", "", value));
+    summary.append(card);
+  }
+
+  const grid = $("#vm-pool-grid");
+  grid.replaceChildren();
+  if (!state.vmPool.length) {
+    grid.append(node("div", "vm-pool-empty", "No scenario VMs found."));
+    setVmPoolControls();
+    return;
+  }
+
+  for (const item of state.vmPool) {
+    const card = node("article", "vm-pool-card");
+    const head = node("div", "vm-pool-card-head");
+    const title = node("div");
+    title.append(
+      node("h2", "", item.title),
+      node("div", "message-meta", `${item.scenario_id} · ${item.mode}`),
+    );
+    head.append(title, node("span", `vm-pool-state ${item.state}`, statusLabel(item.state)));
+    card.append(head);
+
+    const meta = node("div", "vm-pool-meta");
+    meta.append(
+      node("span", "", `Desired: ${item.desired}`),
+      node("span", "", fmtMemory(item.memory_mb)),
+    );
+    card.append(meta);
+    if (item.error) card.append(node("pre", "vm-pool-error", item.error));
+
+    let action = item.desired === "warm" ? "shutdown" : "warm";
+    if (["error", "dirty"].includes(item.state)) action = "warm";
+    let label = action === "warm" ? "Turn on" : "Shutdown";
+    if (item.state === "error") label = "Retry warm-up";
+    if (item.state === "dirty") label = "Reset & warm";
+    if (item.state === "in_use" && action === "shutdown") label = "Shutdown after run";
+    const actions = node("div", "vm-pool-card-actions");
+    const button = node("button", action === "warm" ? "primary-button" : "danger-button", label);
+    button.type = "button";
+    button.dataset.vmPoolAction = action;
+    button.addEventListener("click", () => changeVmPool(`/v1/vm-pool/${item.scenario_id}/${action}`));
+    actions.append(button);
+    card.append(actions);
+    grid.append(card);
+  }
+  setVmPoolControls();
+}
+
+async function refreshVmPool() {
+  if (state.vmPoolSubmitting) return;
+  const errorBox = $("#vm-pool-error");
+  try {
+    state.vmPool = await api("/v1/vm-pool");
+    errorBox.classList.add("hidden");
+    renderVmPool();
+  } catch (error) {
+    errorBox.textContent = `Cannot load VM pool: ${error.message}`;
+    errorBox.classList.remove("hidden");
+  }
+}
+
+async function changeVmPool(path) {
+  state.vmPoolSubmitting = true;
+  setVmPoolControls();
+  const errorBox = $("#vm-pool-error");
+  try {
+    const result = await api(path, { method: "POST", body: "{}" });
+    if (Array.isArray(result)) {
+      state.vmPool = result;
+    } else {
+      state.vmPool = state.vmPool.map((item) => (
+        item.scenario_id === result.scenario_id ? result : item
+      ));
+    }
+    errorBox.classList.add("hidden");
+    renderVmPool();
+  } catch (error) {
+    errorBox.textContent = `VM pool action failed: ${error.message}`;
+    errorBox.classList.remove("hidden");
+  } finally {
+    state.vmPoolSubmitting = false;
+    setVmPoolControls();
+  }
+}
+
+function selectWorkspace(view) {
+  state.activeView = view;
+  const manager = view === "manager";
+  $("#agent-relay-view").classList.toggle("hidden", manager);
+  $("#vm-manager-view").classList.toggle("hidden", !manager);
+  $("#agent-relay-tab").classList.toggle("active", !manager);
+  $("#vm-manager-tab").classList.toggle("active", manager);
+  $("#agent-relay-tab").setAttribute("aria-selected", String(!manager));
+  $("#vm-manager-tab").setAttribute("aria-selected", String(manager));
+  if (manager) refreshVmPool();
 }
 
 function selectedScenario() {
@@ -1039,6 +1166,19 @@ function initTabs() {
 }
 
 async function init() {
+  $("#agent-relay-tab").addEventListener("click", () => selectWorkspace("relay"));
+  $("#vm-manager-tab").addEventListener("click", () => selectWorkspace("manager"));
+  $("#refresh-vm-pool").addEventListener("click", refreshVmPool);
+  $("#warm-all-vms").addEventListener("click", () => {
+    if (confirm("Turn on all scenario VMs? They use about 48 GB of guest RAM in total.")) {
+      changeVmPool("/v1/vm-pool/warm-all");
+    }
+  });
+  $("#shutdown-all-vms").addEventListener("click", () => {
+    if (confirm("Shutdown all idle scenario VMs? A VM in use will stop after its run.")) {
+      changeVmPool("/v1/vm-pool/shutdown-all");
+    }
+  });
   $("#new-conversation").addEventListener("click", openDialog);
   $("#empty-new").addEventListener("click", openDialog);
   $("#close-dialog").addEventListener("click", closeDialog);
@@ -1082,6 +1222,9 @@ async function init() {
   try { await loadConversations({ selectFirst: true }); } catch (error) { showToast(error.message); }
   setInterval(checkHealth, 30000);
   setInterval(() => loadConversations().catch(() => {}), 10000);
+  setInterval(() => {
+    if (state.activeView === "manager") refreshVmPool();
+  }, 3000);
 }
 
 window.addEventListener("beforeunload", closeEventSource);

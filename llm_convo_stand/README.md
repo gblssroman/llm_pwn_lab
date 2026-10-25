@@ -82,6 +82,11 @@ make integration-up
 Evaluator-токен остаётся только на backend и используется для catalog/lifecycle/
 verify/submit, sandbox-токен — только для команд Agent B.
 
+В верхней панели frontend доступны разделы **Agent Relay** и **VM Manager**.
+Второй показывает warm pool, позволяет включать сценарные VM выборочно или все
+сразу и выключать их. Браузер обращается к proxy API Agent Relay; evaluator-токен
+остаётся на backend и во frontend не передаётся.
+
 Каждый YAML-сценарий предоставляет отдельные `prompt_a` и `prompt_b`. Для
 benchmark они подставляются в редактируемые поля system prompt соответствующих
 агентов и отправляются без скрытых дополнений. Сырой сценарий (`checks`,
@@ -100,6 +105,7 @@ make integration-down
 Основные API-маршруты интеграции:
 
 - `GET /v1/vm-master/health` — доступность и конфигурация control API;
+- `GET /v1/vm-pool` и `POST /v1/vm-pool/...` — состояние и управление warm pool;
 - `GET /v1/benchmark-scenarios` — поддерживаемые сценарии без `memory-poisoning`;
 - `POST /v1/benchmark-runs` — provisioning VM и запуск разговора;
 - `GET /v1/benchmark-runs/{conversation_id}` — stage, verifier verdict и tool calls;

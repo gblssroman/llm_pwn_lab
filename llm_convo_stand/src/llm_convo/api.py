@@ -8,6 +8,7 @@ from typing import Annotated, Any
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Query, Request, status
+from fastapi import Path as ApiPath
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -39,6 +40,7 @@ from llm_convo.schemas import (
     StartConversationRequest,
     ToolExecutionView,
     VmMasterHealthResponse,
+    VmPoolItem,
     VmScenario,
 )
 from llm_convo.service import ConversationService, IdempotencyConflictError
@@ -253,6 +255,51 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except VmMasterError as exc:
             raise _vm_http_exception(exc) from exc
         return scenarios
+
+    @app.get("/v1/vm-pool", response_model=list[VmPoolItem])
+    async def list_vm_pool(request: Request) -> list[VmPoolItem]:
+        try:
+            return await request.app.state.vm_master.list_vm_pool()
+        except VmMasterError as exc:
+            raise _vm_http_exception(exc) from exc
+
+    @app.post("/v1/vm-pool/warm-all", response_model=list[VmPoolItem], status_code=202)
+    async def warm_all_vms(request: Request) -> list[VmPoolItem]:
+        try:
+            return await request.app.state.vm_master.change_vm_pool("warm-all")
+        except VmMasterError as exc:
+            raise _vm_http_exception(exc) from exc
+
+    @app.post("/v1/vm-pool/shutdown-all", response_model=list[VmPoolItem], status_code=202)
+    async def shutdown_all_vms(request: Request) -> list[VmPoolItem]:
+        try:
+            return await request.app.state.vm_master.change_vm_pool("shutdown-all")
+        except VmMasterError as exc:
+            raise _vm_http_exception(exc) from exc
+
+    @app.post("/v1/vm-pool/{scenario_id}/warm", response_model=VmPoolItem, status_code=202)
+    async def warm_vm(
+        scenario_id: Annotated[str, ApiPath(pattern=r"^[a-z0-9][a-z0-9-]{0,63}$")],
+        request: Request,
+    ) -> VmPoolItem:
+        try:
+            return await request.app.state.vm_master.change_vm_pool_item(scenario_id, "warm")
+        except VmMasterError as exc:
+            raise _vm_http_exception(exc) from exc
+
+    @app.post(
+        "/v1/vm-pool/{scenario_id}/shutdown",
+        response_model=VmPoolItem,
+        status_code=202,
+    )
+    async def shutdown_vm(
+        scenario_id: Annotated[str, ApiPath(pattern=r"^[a-z0-9][a-z0-9-]{0,63}$")],
+        request: Request,
+    ) -> VmPoolItem:
+        try:
+            return await request.app.state.vm_master.change_vm_pool_item(scenario_id, "shutdown")
+        except VmMasterError as exc:
+            raise _vm_http_exception(exc) from exc
 
     @app.get("/v1/benchmark-scenarios/{scenario_id}", response_model=VmScenario)
     async def get_benchmark_scenario(scenario_id: str, request: Request) -> VmScenario:

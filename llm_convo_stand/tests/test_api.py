@@ -1,8 +1,10 @@
+import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from llm_convo.api import create_app
 from llm_convo.config import Settings
-from llm_convo.schemas import VmScenario, VmScenarioSummary
+from llm_convo.schemas import VmPoolItem, VmScenario, VmScenarioSummary
 
 
 def test_frontend_and_empty_history_are_served(tmp_path) -> None:
@@ -25,7 +27,13 @@ def test_frontend_and_empty_history_are_served(tmp_path) -> None:
         history = client.get("/v1/conversations")
 
     assert frontend.status_code == 200
-    assert "Agent Relay" in frontend.text
+    assert "Agent PWN Lab" in frontend.text
+    assert "Agent Relay" not in frontend.text
+    assert 'id="agent-relay-tab"' in frontend.text
+    assert 'id="vm-manager-tab"' in frontend.text
+    assert 'id="vm-manager-view"' in frontend.text
+    assert "Turn on all" in frontend.text
+    assert "Shutdown all" in frontend.text
     assert 'name="agent_a_base_url"' in frontend.text
     assert 'name="agent_b_base_url"' in frontend.text
     assert 'name="agent_a_model"' in frontend.text
@@ -73,10 +81,16 @@ def test_frontend_and_empty_history_are_served(tmp_path) -> None:
     assert 'name="task_prompt"' not in frontend.text
     assert "system-dot" not in frontend.text
     assert "Backend status" in frontend.text
+    assert "Made by" in frontend.text
+    assert "https://github.com/gblssroman" in frontend.text
+    assert "https://github.com/redrumerr" in frontend.text
     assert 'id="database-status"' in frontend.text
     assert 'id="langfuse-status"' in frontend.text
     assert "database-label" not in frontend.text
     assert "langfuse-label" not in frontend.text
+    assert "function selectWorkspace" in javascript.text
+    assert "function renderVmPool" in javascript.text
+    assert 'api("/v1/vm-pool")' in javascript.text
     assert health.json() == {"status": "ok", "database": "ok", "langfuse": "disabled"}
     assert history.status_code == 200
     assert history.json() == {"items": [], "total": 0, "limit": 50, "offset": 0}
@@ -130,3 +144,72 @@ def test_benchmark_catalog_filters_unsupported_memory_poisoning(tmp_path) -> Non
     assert health.json() == {"configured": True, "status": "ok", "error": None}
     assert [item["id"] for item in catalog.json()] == ["tool-misuse"]
     assert unsupported.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_vm_pool_is_proxied_through_agent_relay(tmp_path) -> None:
+    calls: list[tuple[str, str | None, str | None]] = []
+
+    def item(*, desired: str = "cold", state: str = "cold") -> VmPoolItem:
+        return VmPoolItem(
+            scenario_id="docker-socket",
+            title="Docker socket",
+            mode="escape",
+            desired=desired,
+            state=state,
+            updated_at="2026-10-24T12:00:00Z",
+            memory_mb=4096,
+        )
+
+    class FakeVmMaster:
+        configured = True
+
+        async def list_vm_pool(self):
+            calls.append(("list", None, None))
+            return [item()]
+
+        async def change_vm_pool(self, action):
+            calls.append(("all", None, action))
+            desired = "warm" if action == "warm-all" else "cold"
+            state = "queued" if desired == "warm" else "resetting"
+            return [item(desired=desired, state=state)]
+
+        async def change_vm_pool_item(self, scenario_id, action):
+            calls.append(("item", scenario_id, action))
+            desired = "warm" if action == "warm" else "cold"
+            state = "queued" if desired == "warm" else "resetting"
+            return item(desired=desired, state=state)
+
+    app = create_app(
+        Settings(
+            database_url=f"sqlite+aiosqlite:///{tmp_path / 'vm-pool.sqlite3'}",
+            langfuse_public_key=None,
+            langfuse_secret_key=None,
+            worker_poll_seconds=0.01,
+        )
+    )
+
+    app.state.vm_master = FakeVmMaster()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        listed = await client.get("/v1/vm-pool")
+        warmed = await client.post("/v1/vm-pool/docker-socket/warm")
+        stopped = await client.post("/v1/vm-pool/docker-socket/shutdown")
+        all_warmed = await client.post("/v1/vm-pool/warm-all")
+        all_stopped = await client.post("/v1/vm-pool/shutdown-all")
+
+    assert listed.status_code == 200
+    assert listed.json()[0]["state"] == "cold"
+    assert warmed.status_code == 202
+    assert warmed.json()["desired"] == "warm"
+    assert stopped.status_code == 202
+    assert stopped.json()["desired"] == "cold"
+    assert all_warmed.status_code == 202
+    assert all_stopped.status_code == 202
+    assert calls == [
+        ("list", None, None),
+        ("item", "docker-socket", "warm"),
+        ("item", "docker-socket", "shutdown"),
+        ("all", None, "warm-all"),
+        ("all", None, "shutdown-all"),
+    ]

@@ -18,6 +18,7 @@ from filelock import FileLock
 from .benchmark import (
     escape_config,
     scenario_snapshot,
+    scenario_ssh_port,
     scenario_vagrant_path,
 )
 from .jobs import log_sink
@@ -117,6 +118,7 @@ class Runner:
             LAB_OPENCLAW_VERSION=version,
             LAB_ISOLATED_ESCAPE="1" if attack.mode == "escape" else "0",
             LAB_LINKED_CLONE="1",
+            LAB_SSH_HOST_PORT=str(scenario_ssh_port(attack)),
         )
         env.update(
             VAGRANT_CWD=str(path.parent),
@@ -276,21 +278,30 @@ class Runner:
         )
         return self._complete(process, timeout)
 
-    def up(self, attack):
-        """Восстанавливает подготовленный clone и активирует готовые контейнеры."""
+    def up(self, attack, *, restore=True):
+        """Арендует clone и активирует сценарий, при необходимости после restore."""
         with self.transaction(attack):
             started = time.monotonic()
             emit = log_sink.get()
-            if emit:
-                emit("system", f"[lab] restoring prepared VM for {attack.id}\n")
-            snapshot = scenario_snapshot(self.settings.root, attack)
-            result = self.run(
-                attack,
-                ["snapshot", "restore", snapshot],
-                self.settings.lifecycle_timeout,
-            )
-            if result.exit_code or result.timed_out:
-                return result
+            if restore:
+                if emit:
+                    emit("system", f"[lab] restoring prepared VM for {attack.id}\n")
+                snapshot = scenario_snapshot(self.settings.root, attack)
+                result = self.run(
+                    attack,
+                    ["snapshot", "restore", snapshot],
+                    self.settings.lifecycle_timeout,
+                )
+                if result.exit_code or result.timed_out:
+                    return result
+            else:
+                if emit:
+                    emit("system", f"[lab] leasing warm VM for {attack.id}\n")
+                # A persisted ready marker may outlive a host-side VM failure.
+                # Probe before changing guest state so the pool can fall back to restore.
+                result = self.remote(attack, "true", 30)
+                if result.exit_code or result.timed_out:
+                    return result
             if attack.mode == "escape":
                 # Entropy inside a RAM snapshot is rewound too. Generate the
                 # per-run challenge on the host, after the clean restore.
@@ -322,10 +333,40 @@ class Runner:
                 result.stderr += diagnostic.stderr
                 result.exit_code = diagnostic.exit_code
                 result.timed_out = diagnostic.timed_out
-            timing = (
-                "[lab] prepared VM restore + activation: "
-                f"{time.monotonic() - started:.1f}s\n"
+            path = "restore + activation" if restore else "warm activation"
+            timing = f"[lab] prepared VM {path}: {time.monotonic() - started:.1f}s\n"
+            result.stdout += "\n" + timing
+            if emit:
+                emit("system", timing)
+            return result
+
+    def warm(self, attack, *, reuse_running=False):
+        """Возобновляет canonical memory snapshot без активации сценария."""
+        with self.transaction(attack):
+            started = time.monotonic()
+            emit = log_sink.get()
+            if emit:
+                emit("system", f"[pool] warming VM for {attack.id}\n")
+            if reuse_running:
+                result = self.remote(attack, "true", 30)
+                if not result.exit_code and not result.timed_out:
+                    timing = (
+                        f"[pool] existing warm VM verified: "
+                        f"{time.monotonic() - started:.1f}s\n"
+                    )
+                    result.stdout += "\n" + timing
+                    if emit:
+                        emit("system", timing)
+                    return result
+            result = self.run(
+                attack,
+                ["snapshot", "restore", scenario_snapshot(self.settings.root, attack)],
+                self.settings.lifecycle_timeout,
             )
+            if result.exit_code or result.timed_out:
+                return result
+            result = self.remote(attack, "true", 30)
+            timing = f"[pool] warm VM ready: {time.monotonic() - started:.1f}s\n"
             result.stdout += "\n" + timing
             if emit:
                 emit("system", timing)

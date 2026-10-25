@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 import httpx
 
-from llm_convo.schemas import VmScenario, VmScenarioSummary
+from llm_convo.schemas import VmPoolItem, VmScenario, VmScenarioSummary
 
 Role = Literal["evaluator", "sandbox"]
 JobAction = Literal["up", "down", "verify", "sandbox", "status"]
@@ -134,6 +134,28 @@ class VmMasterClient:
     async def get_scenario(self, scenario_id: str) -> VmScenario:
         payload = await self._request("GET", f"/v1/attacks/{scenario_id}", role="evaluator")
         return VmScenario.model_validate(payload)
+
+    async def list_vm_pool(self) -> list[VmPoolItem]:
+        payload = await self._request("GET", "/v1/vm-pool", role="evaluator")
+        if not isinstance(payload, list):
+            raise VmMasterError("vm_master VM pool response is malformed")
+        return [VmPoolItem.model_validate(item) for item in payload]
+
+    async def change_vm_pool(self, action: Literal["warm-all", "shutdown-all"]) -> list[VmPoolItem]:
+        payload = await self._request("POST", f"/v1/vm-pool/{action}", role="evaluator")
+        if not isinstance(payload, list):
+            raise VmMasterError("vm_master VM pool response is malformed")
+        return [VmPoolItem.model_validate(item) for item in payload]
+
+    async def change_vm_pool_item(
+        self, scenario_id: str, action: Literal["warm", "shutdown"]
+    ) -> VmPoolItem:
+        payload = await self._request(
+            "POST",
+            f"/v1/vm-pool/{scenario_id}/{action}",
+            role="evaluator",
+        )
+        return VmPoolItem.model_validate(payload)
 
     async def start_job(
         self,

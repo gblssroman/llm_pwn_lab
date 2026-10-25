@@ -10,7 +10,7 @@ Vagrant.configure("2") do |config|
   config.vm.boot_timeout = ENV["LAB_BUILD_ESCAPE_BOX"] == "1" ? 600 : 300
   # A distributable builder VM must retain the base box's bootstrap SSH key.
   config.ssh.insert_key = false if ENV["LAB_BUILD_ESCAPE_BOX"] == "1"
-  config.vm.network "forwarded_port", guest: 22, host: 2222, host_ip: "127.0.0.1", id: "ssh", auto_correct: true
+  config.vm.network "forwarded_port", guest: 22, host: Integer(ENV.fetch("LAB_SSH_HOST_PORT", "2222"), 10), host_ip: "127.0.0.1", id: "ssh", auto_correct: !ENV.key?("LAB_SSH_HOST_PORT")
   config.vm.synced_folder ".", "/vagrant", disabled: true
   unless isolated_escape
     config.vm.synced_folder repo, "/workspace", mount_options: ["ro"]
